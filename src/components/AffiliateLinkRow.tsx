@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { updateAffiliateLink } from "@/app/dashboard/actions";
+import { updateAffiliateLink, deleteAffiliateLink } from "@/app/dashboard/actions";
 
 export default function AffiliateLinkRow({
   id, label, category, url: initialUrl, triggerKeywords, isActive,
@@ -14,11 +14,19 @@ export default function AffiliateLinkRow({
   const [url, setUrl] = useState(initialUrl ?? "");
   const [active, setActive] = useState(isActive);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   async function save() {
     setSaving(true);
     await updateAffiliateLink(id, url, active);
     setSaving(false);
+    router.refresh();
+  }
+
+  async function remove() {
+    if (!confirm(`Remove "${label}" from the affiliate link bank?`)) return;
+    setDeleting(true);
+    await deleteAffiliateLink(id);
     router.refresh();
   }
 
@@ -39,13 +47,22 @@ export default function AffiliateLinkRow({
         <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
       </td>
       <td className="py-2">
-        <button
-          onClick={save}
-          disabled={saving}
-          className="rounded-md bg-atlasteal px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={save}
+            disabled={saving || deleting}
+            className="rounded-md bg-atlasteal px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+          <button
+            onClick={remove}
+            disabled={saving || deleting}
+            className="rounded-md border border-red-200 px-2 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"
+          >
+            {deleting ? "Removing…" : "Remove"}
+          </button>
+        </div>
       </td>
     </tr>
   );

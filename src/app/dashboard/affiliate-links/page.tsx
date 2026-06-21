@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import AffiliateLinkRow from "@/components/AffiliateLinkRow";
+import AddAffiliateLinkForm from "@/components/AddAffiliateLinkForm";
 
 export default async function AffiliateLinksPage() {
   const supabase = createClient();
@@ -14,7 +15,11 @@ export default async function AffiliateLinksPage() {
         paste a real affiliate URL here.
       </p>
 
-      <div className="mt-6 overflow-x-auto rounded-xl bg-white p-5 shadow-sm">
+      <div className="mt-6">
+        <AddAffiliateLinkForm />
+      </div>
+
+      <div className="overflow-x-auto rounded-xl bg-white p-5 shadow-sm">
         <table className="w-full text-left">
           <thead>
             <tr className="text-xs uppercase tracking-wide text-atlasnavy/40">
@@ -40,6 +45,11 @@ export default async function AffiliateLinksPage() {
             ))}
           </tbody>
         </table>
+        {(links ?? []).length === 0 && (
+          <p className="py-4 text-sm text-atlasnavy/50">
+            No tools in the bank yet — add one above to get started.
+          </p>
+        )}
       </div>
     </div>
   );
