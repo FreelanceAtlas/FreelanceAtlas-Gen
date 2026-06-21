@@ -79,23 +79,70 @@ SEO requirements (follow the pillar-cluster keyword model and on-page best pract
   facts that are recent and attributable to those sources.
 - Output must be publish-ready: no placeholders, no "[insert here]", no lorem ipsum.
 
-Respond with ONLY a JSON object matching this TypeScript shape, no markdown fences, no commentary:
-{
-  "title": string,
-  "meta_title": string,
-  "meta_description": string,
-  "h1": string,
-  "content_md": string, // full article body in markdown per the REQUIRED POST STRUCTURE above —
-                         // using ## and ### headings, ending with "## Conclusion" then
-                         // "## Key Takeaways", NOT including the H1 or the FAQ section
-  "faqs": [{ "question": string, "answer": string }],
-  "keywords_used": string[], // every keyword (primary + supporting) actually woven into content_md
-  "keyword_usage": [{ "original": string, "used_as": string }]
-  // ONE entry per keyword in keywords_used, in the SAME order. If you wrote the keyword exactly as
-  // given, used_as === original. If you merged it with another keyword or swapped in a synonym,
-  // used_as is the literal text that actually appears in content_md so it can still be located and
-  // tied back to the original target keyword.
-}`;
+Call the submit_article tool exactly once with the completed post. Do not respond with plain text.`;
+
+const ARTICLE_TOOL = {
+  name: "submit_article",
+  description: "Submit the completed, publish-ready FreelanceAtlas blog post.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      title: { type: "string", description: "Internal/working title for the post." },
+      meta_title: { type: "string", description: "<= 60 characters, primary keyword near the front." },
+      meta_description: {
+        type: "string",
+        description: "<= 155 characters, includes the primary keyword and the concrete benefit.",
+      },
+      h1: { type: "string", description: "The on-page H1, containing the primary keyword near the front." },
+      content_md: {
+        type: "string",
+        description:
+          "Full article body in markdown per the REQUIRED POST STRUCTURE — using ## and ### headings, " +
+          "ending with '## Conclusion' then '## Key Takeaways'. Do NOT include the H1 or the FAQ section here.",
+      },
+      faqs: {
+        type: "array",
+        description: "4-6 FAQ entries covering the supplied reader questions.",
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            answer: { type: "string" },
+          },
+          required: ["question", "answer"],
+        },
+      },
+      keywords_used: {
+        type: "array",
+        description: "Every keyword (primary + supporting) actually woven into content_md.",
+        items: { type: "string" },
+      },
+      keyword_usage: {
+        type: "array",
+        description:
+          "One entry per keyword in keywords_used, same order. used_as === original unless merged/swapped.",
+        items: {
+          type: "object",
+          properties: {
+            original: { type: "string" },
+            used_as: { type: "string" },
+          },
+          required: ["original", "used_as"],
+        },
+      },
+    },
+    required: [
+      "title",
+      "meta_title",
+      "meta_description",
+      "h1",
+      "content_md",
+      "faqs",
+      "keywords_used",
+      "keyword_usage",
+    ],
+  },
+};
 
 export async function generateArticle(input: GenerateInput): Promise<GeneratedArticle> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -126,7 +173,7 @@ ${sourceBlock}
 Real reader questions to address in the FAQ section (cover every one of these, rephrased naturally if needed):
 ${faqBlock}
 
-Write the full FreelanceAtlas blog post now.`;
+Write the full FreelanceAtlas blog post now by calling submit_article.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -137,10 +184,11 @@ Write the full FreelanceAtlas blog post now.`;
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      // A full article body + 4-6 FAQs + keyword usage table reliably exceeds 4096 tokens,
-      // which was silently truncating the JSON mid-string and breaking JSON.parse below.
+      // A full article body + 4-6 FAQs + keyword usage table reliably exceeds 4096 tokens.
       max_tokens: 8192,
       system: SYSTEM_PROMPT,
+      tools: [ARTICLE_TOOL],
+      tool_choice: { type: "tool", name: "submit_article" },
       messages: [{ role: "user", content: userPrompt }],
     }),
   });
@@ -158,18 +206,12 @@ Write the full FreelanceAtlas blog post now.`;
     );
   }
 
-  const raw = data.content?.[0]?.text ?? "{}";
-  const jsonStart = raw.indexOf("{");
-  const jsonEnd = raw.lastIndexOf("}");
-
-  let parsed: GeneratedArticle;
-  try {
-    parsed = JSON.parse(raw.slice(jsonStart, jsonEnd + 1)) as GeneratedArticle;
-  } catch (err) {
+  const toolUse = (data.content ?? []).find((block: any) => block.type === "tool_use");
+  if (!toolUse) {
     throw new Error(
-      `Generation response could not be parsed as JSON (${(err as Error).message}). This usually means the response was truncated or malformed — try generating again.`
+      "The model did not return a structured article (no tool call found). Try generating again."
     );
   }
 
-  return parsed;
+  return toolUse.input as GeneratedArticle;
 }
