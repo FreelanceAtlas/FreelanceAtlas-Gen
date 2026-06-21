@@ -2,9 +2,8 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
-import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import { checkOriginality, rewriteFlaggedPassages } from "@/lib/originality";
-import { factCheckArticle } from "@/lib/factcheck";
+import { factCheckArticle, FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
   const supabase = createClient();
@@ -46,31 +45,34 @@ export async function deleteAffiliateLink(id: string) {
   revalidatePath("/dashboard/affiliate-links");
 }
 
-// Originality gate: an article cannot move to "published" while its originality_check
-// score is below the pass threshold (or otherwise flagged needs_review), unless the
-// caller explicitly force-publishes — same override pattern as the duplicate-content
-// guard in /api/generate. This is the actual enforcement point; the article page panel
-// is just the visibility into why a publish attempt was blocked.
+// Fact-check gate: an article cannot move to "published" while its fact_check
+// accuracy_score is below the pass threshold (or otherwise flagged needs_review),
+// unless the caller explicitly force-publishes — same override pattern as the
+// duplicate-content guard in /api/generate. Misinformation reaching readers is the
+// failure mode worth blocking on. Originality is intentionally NOT a publish blocker
+// here — it stays visible as an advisory score/panel on the article page, but a
+// low-originality draft (with no fact-check problems) can be published without
+// needing an override.
 export async function updateArticleStatus(articleId: string, status: string, force = false) {
   const supabase = createClient();
 
   if (status === "published" && !force) {
     const { data: article, error: fetchError } = await supabase
       .from("articles")
-      .select("originality_check")
+      .select("fact_check")
       .eq("id", articleId)
       .single();
 
     if (fetchError) throw new Error(fetchError.message);
 
-    const check = article?.originality_check as
-      | { originality_score: number; needs_review: boolean }
+    const check = article?.fact_check as
+      | { accuracy_score: number; needs_review: boolean }
       | null;
 
-    if (check && (check.needs_review || check.originality_score < ORIGINALITY_PASS_THRESHOLD)) {
+    if (check && (check.needs_review || check.accuracy_score < FACT_CHECK_PASS_THRESHOLD)) {
       throw new Error(
-        `Originality gate: this draft scored ${check.originality_score}/100 (needs ${ORIGINALITY_PASS_THRESHOLD}+ to publish). ` +
-          `Rewrite the flagged passages and regenerate, or use "Publish anyway" to override.`
+        `Fact-check gate: this draft scored ${check.accuracy_score}/100 (needs ${FACT_CHECK_PASS_THRESHOLD}+ to publish). ` +
+          `Review the flagged claims and fix or regenerate, or use "Publish anyway" to override.`
       );
     }
   }
