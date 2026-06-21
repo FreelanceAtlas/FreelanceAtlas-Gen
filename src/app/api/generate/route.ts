@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { generateArticle } from "@/lib/generate";
+import { factCheckArticle } from "@/lib/factcheck";
 import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from "@/lib/seo";
 
 export async function POST(request: Request) {
@@ -13,6 +14,7 @@ export async function POST(request: Request) {
     supportingKeywords = [],
     sources = [],
     notes = "",
+    suggestedFaqs = [],
     force = false,
   } = body as {
     clusterId: string;
@@ -20,6 +22,7 @@ export async function POST(request: Request) {
     supportingKeywords: string[];
     sources: { url: string; title: string; publishedDate?: string }[];
     notes?: string;
+    suggestedFaqs?: string[];
     force?: boolean;
   };
 
@@ -63,6 +66,7 @@ export async function POST(request: Request) {
     supportingKeywords,
     sources,
     notes,
+    suggestedFaqs,
   });
 
   // --- Auto-apply affiliate links wherever a tracked tool is mentioned ----------
@@ -101,6 +105,11 @@ export async function POST(request: Request) {
     }))
   );
 
+  // --- Fact-check the draft against the sources it was grounded in --------------
+  // Non-blocking: always saves the article either way, the result just surfaces
+  // an accuracy score and a list of claims that need editor review.
+  const factCheck = await factCheckArticle(generated.content_md, generated.faqs, sources);
+
   const { data: article, error } = await supabase
     .from("articles")
     .insert({
@@ -115,6 +124,7 @@ export async function POST(request: Request) {
       keyword_table: keywordTable,
       sources,
       affiliate_links_used: affiliateLinksUsed,
+      fact_check: factCheck,
       status: "draft",
     })
     .select()

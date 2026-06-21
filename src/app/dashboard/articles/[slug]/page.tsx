@@ -21,6 +21,16 @@ export default async function ArticleDetail({ params }: { params: { slug: string
   const bodyHtml = highlightKeywords(marked.parse(article.content_md) as string, markerEntries);
   const h1Html = highlightKeywords(article.h1, markerEntries);
 
+  const factCheck = article.fact_check as
+    | { accuracy_score: number; needs_review: boolean; issues: { claim: string; concern: string; severity: "low" | "medium" | "high" }[] }
+    | null;
+
+  const severityStyles: Record<string, string> = {
+    high: "bg-red-100 text-red-700",
+    medium: "bg-amber-100 text-amber-700",
+    low: "bg-atlasnavy/10 text-atlasnavy/70",
+  };
+
   return (
     <div className="max-w-3xl">
       <div className="flex items-start justify-between">
@@ -41,6 +51,57 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Meta description:</span> {article.meta_description}</p>
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Slug:</span> /{article.slug}</p>
       </div>
+
+      {factCheck && (
+        <div
+          className={`mt-6 rounded-xl border p-6 shadow-sm ${
+            factCheck.needs_review ? "border-amber-300 bg-amber-50" : "border-emerald-300 bg-emerald-50"
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-atlasnavy">Fact-check</h2>
+            <span
+              className={`rounded-full px-3 py-1 text-sm font-bold ${
+                factCheck.accuracy_score >= 90
+                  ? "bg-emerald-600 text-white"
+                  : factCheck.accuracy_score >= 70
+                  ? "bg-amber-500 text-white"
+                  : "bg-red-600 text-white"
+              }`}
+            >
+              {factCheck.accuracy_score}/100 accuracy
+            </span>
+          </div>
+          <p className="mt-1 text-sm text-atlasnavy/70">
+            {factCheck.needs_review
+              ? "An editor should review the items below before publishing."
+              : "No unsupported claims found against the supplied sources."}
+          </p>
+
+          {factCheck.issues.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-atlasnavy/60">
+                Needs review
+              </p>
+              <ul className="mt-2 space-y-2">
+                {factCheck.issues.map((issue, i) => (
+                  <li key={i} className="rounded-md bg-white/70 p-3 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${severityStyles[issue.severity] ?? severityStyles.low}`}
+                      >
+                        {issue.severity}
+                      </span>
+                      <span className="font-medium text-atlasnavy">{issue.claim}</span>
+                    </div>
+                    <p className="mt-1 text-atlasnavy/70">{issue.concern}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       <article
         className="prose prose-sm mt-6 max-w-none rounded-xl bg-white p-6 shadow-sm prose-headings:text-atlasnavy"

@@ -8,6 +8,7 @@ export interface GenerateInput {
   supportingKeywords: string[];
   sources: { url: string; title: string; publishedDate?: string }[];
   notes?: string;
+  suggestedFaqs?: string[]; // real reader questions surfaced by the "Fetch sources" research step
 }
 
 export interface KeywordUsage {
@@ -70,7 +71,10 @@ SEO requirements (follow the pillar-cluster keyword model and on-page best pract
   original target keyword and the swapped-in form are both tracked, never silently dropped.
 - Include a FAQ section (4-6 Q&As, returned separately as "faqs", do not duplicate it inside
   content_md) written in the same direct voice, phrased for featured-snippet / People Also Ask
-  style queries (e.g. "Can you really make a living on Upwork in 2026?").
+  style queries (e.g. "Can you really make a living on Upwork in 2026?"). If a list of "reader
+  questions to address" is supplied in the user message, your FAQ entries should cover those
+  specific questions (rephrased naturally if needed) rather than generic substitutes — every
+  supplied question should map to at least one FAQ entry.
 - Cite the supplied sources inline where relevant (e.g. "according to [Source Name]") and only use
   facts that are recent and attributable to those sources.
 - Output must be publish-ready: no placeholders, no "[insert here]", no lorem ipsum.
@@ -107,6 +111,10 @@ export async function generateArticle(input: GenerateInput): Promise<GeneratedAr
         .join("\n")
     : "No external sources were supplied — keep claims general and avoid invented statistics.";
 
+  const faqBlock = input.suggestedFaqs?.length
+    ? input.suggestedFaqs.map((q) => `- ${q}`).join("\n")
+    : "None supplied — choose the most likely People Also Ask style questions yourself.";
+
   const userPrompt = `Cluster: ${input.clusterName}
 Primary keyword: ${input.primaryKeyword}
 Supporting keywords: ${input.supportingKeywords.join(", ") || "none"}
@@ -114,6 +122,9 @@ Editor notes: ${input.notes || "none"}
 
 Recent, credible sources to ground this article in (cite these, prefer the most recent):
 ${sourceBlock}
+
+Real reader questions to address in the FAQ section (cover every one of these, rephrased naturally if needed):
+${faqBlock}
 
 Write the full FreelanceAtlas blog post now.`;
 
