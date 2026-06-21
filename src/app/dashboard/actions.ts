@@ -324,3 +324,21 @@ export async function bulkDeleteArticles(articleIds: string[]) {
 
   revalidatePath("/dashboard/articles");
 }
+
+// Keywords are never hard-deleted from the bank — they're a valuable research
+// asset (sourced from Wordstream/SEMrush/Ahrefs/etc.) and stay useful for future
+// drafts even after a cluster's article that used them gets removed. This just
+// flips a keyword's is_used flag back to false so it reappears as "Available"
+// in the keyword bank and becomes selectable again on the Generate form. Used
+// by the "Revert to unused" control on the Clusters & keyword bank page.
+export async function revertKeywordToUnused(keywordId: string) {
+  const supabase = createClient();
+  const { error } = await supabase
+    .from("keywords")
+    .update({ is_used: false })
+    .eq("id", keywordId);
+  if (error) throw new Error(error.message);
+
+  revalidatePath("/dashboard/clusters");
+  revalidatePath("/dashboard/generate");
+}
