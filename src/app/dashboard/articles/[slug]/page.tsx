@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { marked } from "marked";
 import { createClient } from "@/lib/supabase/server";
 import { highlightKeywords } from "@/lib/seo";
+import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import StatusControl from "@/components/StatusControl";
 
 export default async function ArticleDetail({ params }: { params: { slug: string } }) {
@@ -23,6 +24,14 @@ export default async function ArticleDetail({ params }: { params: { slug: string
 
   const factCheck = article.fact_check as
     | { accuracy_score: number; needs_review: boolean; issues: { claim: string; concern: string; severity: "low" | "medium" | "high" }[] }
+    | null;
+
+  const originalityCheck = article.originality_check as
+    | {
+        originality_score: number;
+        needs_review: boolean;
+        issues: { excerpt: string; likely_source: string; concern: string; severity: "low" | "medium" | "high" }[];
+      }
     | null;
 
   const severityStyles: Record<string, string> = {
@@ -51,6 +60,58 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Meta description:</span> {article.meta_description}</p>
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Slug:</span> /{article.slug}</p>
       </div>
+
+      {originalityCheck && (
+        <div
+          className={`mt-6 rounded-xl border p-6 shadow-sm ${
+            originalityCheck.needs_review ? "border-amber-300 bg-amber-50" : "border-emerald-300 bg-emerald-50"
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-atlasnavy">Originality</h2>
+            <span
+              className={`rounded-full px-3 py-1 text-sm font-bold ${
+                originalityCheck.originality_score >= ORIGINALITY_PASS_THRESHOLD
+                  ? "bg-emerald-600 text-white"
+                  : originalityCheck.originality_score >= 60
+                  ? "bg-amber-500 text-white"
+                  : "bg-red-600 text-white"
+              }`}
+            >
+              {originalityCheck.originality_score}/100 original
+            </span>
+          </div>
+          <p className="mt-1 text-sm text-atlasnavy/70">
+            {originalityCheck.needs_review
+              ? `Below the ${ORIGINALITY_PASS_THRESHOLD}/100 publish threshold — publishing is blocked until the flagged passages are rewritten and the article is regenerated, or an editor explicitly overrides it.`
+              : "Reads as an independent synthesis — no passage traced back to a single source's wording or structure."}
+          </p>
+
+          {originalityCheck.issues.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-atlasnavy/60">
+                Flagged passages
+              </p>
+              <ul className="mt-2 space-y-2">
+                {originalityCheck.issues.map((issue, i) => (
+                  <li key={i} className="rounded-md bg-white/70 p-3 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${severityStyles[issue.severity] ?? severityStyles.low}`}
+                      >
+                        {issue.severity}
+                      </span>
+                      <span className="text-xs text-atlasnavy/50">resembles: {issue.likely_source}</span>
+                    </div>
+                    <p className="mt-1 italic text-atlasnavy/80">&ldquo;{issue.excerpt}&rdquo;</p>
+                    <p className="mt-1 text-atlasnavy/70">{issue.concern}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       {factCheck && (
         <div
