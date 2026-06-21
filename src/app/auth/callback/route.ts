@@ -10,10 +10,31 @@ export async function GET(request: Request) {
   const code = searchParams.get("code");
   const next = searchParams.get("next") ?? "/dashboard";
 
-  if (code) {
-    const supabase = createClient();
-    await supabase.auth.exchangeCodeForSession(code);
+  console.log("[auth/callback] hit", {
+    hasCode: !!code,
+    next,
+    fullUrl: request.url,
+  });
+
+  if (!code) {
+    console.log("[auth/callback] no code param present, redirecting with error");
+    return NextResponse.redirect(`${origin}${next}?auth_error=no_code`);
   }
 
+  const supabase = createClient();
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+  if (error) {
+    console.error("[auth/callback] exchangeCodeForSession failed", {
+      message: error.message,
+      status: error.status,
+      name: error.name,
+    });
+    return NextResponse.redirect(
+      `${origin}${next}?auth_error=${encodeURIComponent(error.message)}`
+    );
+  }
+
+  console.log("[auth/callback] exchange succeeded, redirecting to", next);
   return NextResponse.redirect(`${origin}${next}`);
 }
