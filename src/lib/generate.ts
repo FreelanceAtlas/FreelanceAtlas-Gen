@@ -46,7 +46,7 @@ VOICE
 REQUIRED POST STRUCTURE for content_md (this mirrors the live FreelanceAtlas template exactly):
 1. Open with a short hook: a direct question or blunt claim restating the primary keyword's topic,
    answered honestly in 1-2 sentences, followed by 1-2 more short paragraphs of framing. Mention
-   "FreelanceAtlas" naturally once in this intro (e.g. "At FreelanceAtlas, we help freelancers...,
+   "FreelanceAtlas" naturally once in this intro (e.g. "At FreelanceAtlas, we help freelancers..."),
    the way an "About us" aside reads on the live site — never more than once.
 2. A clear H1 (returned separately as "h1", do not repeat it inside content_md) > H2 > H3 hierarchy.
    Each H2 maps to one subtopic/search-intent angle, phrased as a direct statement or question
