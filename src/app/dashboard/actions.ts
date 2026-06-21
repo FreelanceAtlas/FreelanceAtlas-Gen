@@ -3,6 +3,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
 import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
+import { checkOriginality } from "@/lib/originality";
+import { factCheckArticle } from "@/lib/factcheck";
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
   const supabase = createClient();
@@ -76,4 +78,41 @@ export async function updateArticleStatus(articleId: string, status: string, for
   const { error } = await supabase.from("articles").update({ status }).eq("id", articleId);
   if (error) throw new Error(error.message);
   revalidatePath("/dashboard/articles");
+}
+
+// Re-run the originality and fact checks against an article's existing stored
+// content, in place — no new article row is created. This exists for drafts
+// whose stored check result is stale (e.g. computed before a bugfix to the
+// check itself, such as the max_tokens 2048->8192 truncation fix), so an
+// editor can refresh the score without burning a full regeneration.
+export async function recheckArticleChecks(articleId: string) {
+  const supabase = createClient();
+
+  const { data: article, error: fetchError } = await supabase
+    .from("articles")
+    .select("content_md, faqs, sources, slug")
+    .eq("id", articleId)
+    .single();
+
+  if (fetchError) throw new Error(fetchError.message);
+  if (!article) throw new Error("Article not found");
+
+  const sources = article.sources ?? [];
+  const faqs = article.faqs ?? [];
+
+  const [originalityCheck, factCheck] = await Promise.all([
+    checkOriginality(article.content_md, sources),
+    factCheckArticle(article.content_md, faqs, sources),
+  ]);
+
+  const { error: updateError } = await supabase
+    .from("articles")
+    .update({ originality_check: originalityCheck, fact_check: factCheck })
+    .eq("id", articleId);
+
+  if (updateError) throw new Error(updateError.message);
+
+  revalidatePath(`/dashboard/articles/${article.slug}`);
+
+  return { originalityCheck, factCheck };
 }
