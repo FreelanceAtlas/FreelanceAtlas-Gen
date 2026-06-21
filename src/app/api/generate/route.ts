@@ -5,10 +5,6 @@ import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from 
 
 export async function POST(request: Request) {
   const supabase = createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  }
 
   const body = await request.json();
   const {
@@ -44,7 +40,6 @@ export async function POST(request: Request) {
 
   if (duplicateMatches.length > 0 && !force) {
     await supabase.from("generation_logs").insert({
-      user_id: user.id,
       input_topic: primaryKeyword,
       cluster_id: clusterId,
       duplicate_warning: true,
@@ -121,7 +116,6 @@ export async function POST(request: Request) {
       sources,
       affiliate_links_used: affiliateLinksUsed,
       status: "draft",
-      created_by: user.id,
     })
     .select()
     .single();
@@ -138,7 +132,6 @@ export async function POST(request: Request) {
   }
 
   await supabase.from("generation_logs").insert({
-    user_id: user.id,
     input_topic: primaryKeyword,
     cluster_id: clusterId,
     duplicate_warning: false,

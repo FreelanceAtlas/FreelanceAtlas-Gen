@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { updateAffiliateLink } from "@/app/dashboard/actions";
 
 export default function AffiliateLinkRow({
   id, label, category, url: initialUrl, triggerKeywords, isActive,
@@ -10,7 +10,6 @@ export default function AffiliateLinkRow({
   id: string; label: string; category: string | null; url: string | null;
   triggerKeywords: string[]; isActive: boolean;
 }) {
-  const supabase = createClient();
   const router = useRouter();
   const [url, setUrl] = useState(initialUrl ?? "");
   const [active, setActive] = useState(isActive);
@@ -18,7 +17,7 @@ export default function AffiliateLinkRow({
 
   async function save() {
     setSaving(true);
-    await supabase.from("affiliate_links").update({ url: url || null, is_active: active }).eq("id", id);
+    await updateAffiliateLink(id, url, active);
     setSaving(false);
     router.refresh();
   }
