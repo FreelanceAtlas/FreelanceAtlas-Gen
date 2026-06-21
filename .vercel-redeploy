@@ -1,1 +1,1 @@
-redeploy after linking shared env vars to freelance-atlas-gen project
+Trigger redeploy after adding env vars directly at project level
