@@ -46,7 +46,7 @@ VOICE
 REQUIRED POST STRUCTURE for content_md (this mirrors the live FreelanceAtlas template exactly):
 1. Open with a short hook: a direct question or blunt claim restating the primary keyword's topic,
    answered honestly in 1-2 sentences, followed by 1-2 more short paragraphs of framing. Mention
-   "FreelanceAtlas" naturally once in this intro (e.g. "At FreelanceAtlas, we help freelancers..."),
+   "FreelanceAtlas" naturally once in this intro (e.g. "At FreelanceAtlas, we help freelancers...,
    the way an "About us" aside reads on the live site — never more than once.
 2. A clear H1 (returned separately as "h1", do not repeat it inside content_md) > H2 > H3 hierarchy.
    Each H2 maps to one subtopic/search-intent angle, phrased as a direct statement or question
@@ -94,17 +94,27 @@ style preference):
   examples, categories, or sequence in substantially the same order.
 - Write your own examples, transitions, explanations, headings, and conclusion — avoid any
   source-specific metaphor, hook, slogan, or rhetorical device.
+- Invent your own illustrative examples, personas, niches, numbers, and scenarios whenever you
+  illustrate a point — e.g. if a source illustrates "specificity" with a B2B SaaS copywriter or a
+  restaurant social media manager, do not reuse that example (even reworded); invent a different
+  industry, role, and detail set of your own. The specific example is part of what must be original,
+  not just the sentence wording around it.
+- Do not reuse a source's rhetorical contrast or definitional framing device, even when you restate
+  it in new words. This includes patterns like "X is a complete statement, Y is not," "passion
+  without demand is a hobby, not a business," "it feels like closing doors, but actually...," or any
+  other punchy contrast/aphorism structure carried over from a source — invent your own way of making
+  the same point instead of slotting new words into a source's rhetorical mold.
 - Treat common, widely-known advice as general knowledge and explain it in your own words rather than
   treating it as something that must be attributed.
 - Only attribute a claim to a source ("according to [Source]") when that exact claim is genuinely
   supported by that source — never as a generic citation dropped near unrelated content.
 - Never invent studies, statistics, performance claims, or "expert consensus" that isn't in the
   supplied sources.
-- Before finalizing, mentally re-read your draft and rewrite any sentence or paragraph that still
-  sounds like it was lifted or lightly reworded from one specific source.
+- Before finalizing, mentally re-read your draft and rewrite any sentence, example, or rhetorical
+  device that still resembles — even loosely, even reworded — something from one specific source.
 - The finished article should read like an independently written expert guide — not a rewritten
   compilation of the source material. A different editor handed the same source list in a different
-  order should still arrive at a differently structured article.
+  order should still arrive at a differently structured article with different examples.
 
 Call the submit_article tool exactly once with the completed post. Do not respond with plain text.`;
 
