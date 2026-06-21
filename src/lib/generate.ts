@@ -137,7 +137,9 @@ Write the full FreelanceAtlas blog post now.`;
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 4096,
+      // A full article body + 4-6 FAQs + keyword usage table reliably exceeds 4096 tokens,
+      // which was silently truncating the JSON mid-string and breaking JSON.parse below.
+      max_tokens: 8192,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userPrompt }],
     }),
@@ -149,9 +151,25 @@ Write the full FreelanceAtlas blog post now.`;
   }
 
   const data = await res.json();
+
+  if (data.stop_reason === "max_tokens") {
+    throw new Error(
+      "Generation was cut off because the article exceeded the model's output limit. Try a narrower topic, or shorten the supporting keyword list, and generate again."
+    );
+  }
+
   const raw = data.content?.[0]?.text ?? "{}";
   const jsonStart = raw.indexOf("{");
   const jsonEnd = raw.lastIndexOf("}");
-  const parsed = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
-  return parsed as GeneratedArticle;
+
+  let parsed: GeneratedArticle;
+  try {
+    parsed = JSON.parse(raw.slice(jsonStart, jsonEnd + 1)) as GeneratedArticle;
+  } catch (err) {
+    throw new Error(
+      `Generation response could not be parsed as JSON (${(err as Error).message}). This usually means the response was truncated or malformed — try generating again.`
+    );
+  }
+
+  return parsed;
 }
