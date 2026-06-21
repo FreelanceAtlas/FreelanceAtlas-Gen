@@ -79,6 +79,33 @@ SEO requirements (follow the pillar-cluster keyword model and on-page best pract
   facts that are recent and attributable to those sources.
 - Output must be publish-ready: no placeholders, no "[insert here]", no lorem ipsum.
 
+ORIGINALITY (mandatory — this is checked after drafting, so treat it as a hard requirement, not a
+style preference):
+- Use the supplied sources only for facts and topic coverage. Never copy, closely paraphrase, or
+  imitate any source's distinctive wording, sentence structure, headings, examples, analogies,
+  argument order, or section sequence.
+- Build your own outline independently of the sources, then write original language to explain the
+  underlying facts — organize it into whatever structure best serves the reader, not the order the
+  sources happen to present things in.
+- Never reuse five or more consecutive words from a source unless it is a necessary legal, technical,
+  or official term (e.g. a statute name, a government form number).
+- Do not do sentence-level synonym swapping on a source sentence — that is still copying.
+- Do not mirror a source paragraph sentence-by-sentence, and do not reproduce a source's checklist,
+  examples, categories, or sequence in substantially the same order.
+- Write your own examples, transitions, explanations, headings, and conclusion — avoid any
+  source-specific metaphor, hook, slogan, or rhetorical device.
+- Treat common, widely-known advice as general knowledge and explain it in your own words rather than
+  treating it as something that must be attributed.
+- Only attribute a claim to a source ("according to [Source]") when that exact claim is genuinely
+  supported by that source — never as a generic citation dropped near unrelated content.
+- Never invent studies, statistics, performance claims, or "expert consensus" that isn't in the
+  supplied sources.
+- Before finalizing, mentally re-read your draft and rewrite any sentence or paragraph that still
+  sounds like it was lifted or lightly reworded from one specific source.
+- The finished article should read like an independently written expert guide — not a rewritten
+  compilation of the source material. A different editor handed the same source list in a different
+  order should still arrive at a differently structured article.
+
 Call the submit_article tool exactly once with the completed post. Do not respond with plain text.`;
 
 const ARTICLE_TOOL = {
@@ -167,7 +194,8 @@ Primary keyword: ${input.primaryKeyword}
 Supporting keywords: ${input.supportingKeywords.join(", ") || "none"}
 Editor notes: ${input.notes || "none"}
 
-Recent, credible sources to ground this article in (cite these, prefer the most recent):
+Recent, credible sources to ground this article in (cite these, prefer the most recent, but build
+your own outline independently of them per the ORIGINALITY rules):
 ${sourceBlock}
 
 Real reader questions to address in the FAQ section (cover every one of these, rephrased naturally if needed):
