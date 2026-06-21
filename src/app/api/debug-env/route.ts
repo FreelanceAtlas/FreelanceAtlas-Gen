@@ -25,6 +25,7 @@ export async function GET() {
     allKeysContainingSupabaseOrAccessOrSession: keys.filter((k) =>
       /supabase|access|session/i.test(k)
     ),
+    allEnvKeys: keys.sort(),
     vercelEnv: process.env.VERCEL_ENV ?? null,
     nodeEnv: process.env.NODE_ENV ?? null,
   });
