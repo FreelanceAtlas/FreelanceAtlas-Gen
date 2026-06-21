@@ -1,20 +1,20 @@
 // Post-generation originality pass: re-reads the drafted article alongside the
-// sources it was researched from, and flags any passage that reads as a close
-// paraphrase, a sentence-by-sentence mirror, or a reused checklist/section order
-// from one specific source. This is a GATE, not just an advisory panel — see
-// updateArticleStatus in src/app/dashboard/actions.ts, which blocks publishing
-// an article whose originality_score falls below the threshold until an editor
-// either rewrites the flagged passages and regenerates, or force-publishes.
+// sources it was researched from, and flags any passage that is a verbatim or
+// near-verbatim run of words lifted from one specific source — true plagiarism,
+// not general topical overlap or paraphrase. This is a GATE, not just an advisory
+// panel — see updateArticleStatus in src/app/dashboard/actions.ts, which blocks
+// publishing an article whose originality_score falls below the threshold until
+// an editor either rewrites the flagged passages and regenerates, or force-publishes.
 
 export interface OriginalityIssue {
   excerpt: string;       // the article passage that reads as too close to a source
   likely_source: string; // title/domain of the source it resembles, or "multiple sources" / "unclear"
-  concern: string;       // what specifically is too close: phrasing, sentence order, checklist order, etc.
+  concern: string;       // what specifically is copied: the exact words/run that match the source
   severity: "low" | "medium" | "high";
 }
 
 export interface OriginalityResult {
-  originality_score: number; // 0-100. 100 = reads as fully independent synthesis, no traceable mirroring.
+  originality_score: number; // 0-100. 100 = no verbatim/near-verbatim text traceable to a source.
   needs_review: boolean;
   issues: OriginalityIssue[];
 }
@@ -30,10 +30,9 @@ const ORIGINALITY_TOOL = {
       originality_score: {
         type: "number",
         description:
-          "0-100. 100 = the article reads as an independently written synthesis with no passage " +
-          "traceable to a single source's wording, sentence order, or structure. Deduct heavily for " +
-          "any five-plus-word verbatim run, sentence-by-sentence mirroring, or a checklist/section " +
-          "order reused from one source.",
+          "0-100. 100 = no passage in the article is a verbatim or near-verbatim run of words copied " +
+          "from a single source. Deduct heavily for any five-plus-word verbatim run, or a sentence that " +
+          "is identical to a source sentence apart from one or two word substitutions.",
       },
       needs_review: {
         type: "boolean",
@@ -84,7 +83,7 @@ export async function checkOriginality(
   }
 
   if (sources.length === 0) {
-    // Nothing to mirror — pass cleanly rather than penalizing topics with no supplied sources.
+    // Nothing to copy from — pass cleanly rather than penalizing topics with no supplied sources.
     return { originality_score: 100, needs_review: false, issues: [] };
   }
 
@@ -92,36 +91,34 @@ export async function checkOriginality(
     .map((s) => `- ${s.title} (${s.publishedDate ?? "date unknown"}): ${s.url}`)
     .join("\n");
 
-  const systemPrompt = `You are an originality/anti-plagiarism editor for FreelanceAtlas. You will be
-given a drafted article body and the list of sources the writer researched from. Your job is to catch
-content that is too close to one specific source, even if no single sentence is a perfect verbatim
-copy.
+  const systemPrompt = `You are a plagiarism checker for FreelanceAtlas. You will be given a drafted
+article body and the list of sources the writer researched from. Your only job is to catch text that
+is copied word-for-word (or with only trivial word substitutions) from one of those sources. You are
+NOT checking for paraphrase, topical overlap, reused examples, reused structure, or reused rhetorical
+style — only literal copied wording.
 
 Flag a passage if:
 - It reuses a run of five or more consecutive words from a source, unless that run is a necessary
   legal, technical, or official term (e.g. a statute name, a government form number).
-- It is a sentence-level synonym swap of a source sentence — same structure and claims, different
-  words.
-- It mirrors a source paragraph sentence-by-sentence, in the same order, even with different wording.
-- It reproduces a source's checklist, list of examples, categories, or section sequence in
-  substantially the same order.
-- It uses a source-specific metaphor, hook, slogan, or rhetorical device rather than an original one.
-- It attributes a claim to a named source ("according to X") that doesn't actually support that exact
-  claim, or cites a source for something that's really just common, widely-known advice.
+- It is a near-verbatim copy of a source sentence — identical or almost identical wording, with at
+  most one or two words changed.
 
 Do NOT flag:
+- Paraphrase, synonym swaps, or sentences that make the same point as a source in different words.
+- Reused examples, personas, scenarios, checklists, or section/topic order — covering the same ground
+  as a source in your own words is expected, not plagiarism.
+- Reused metaphors, hooks, slogans, or rhetorical/contrast devices, as long as the actual wording is
+  original.
 - General, widely-known freelancing/business advice explained independently, even if a source also
-  mentions it — shared facts and common advice are not plagiarism.
+  mentions it.
 - Necessary legal, technical, or official terminology that must stay precise (e.g. "Form W-9",
   "Schedule C", "DBA").
-- Normal topical overlap — covering the same subtopics as the sources is expected; the concern is only
-  reused wording, sentence order, or structure.
+- Attribution or sourcing concerns ("according to X") — that is a fact-check concern, not an
+  originality concern; ignore it here entirely.
 
-Score originality_score 0-100: 100 means the article reads as an independently written expert guide
-that could not be traced back to any single source's phrasing or structure, even though it covers the
-same underlying facts. Deduct heavily for any high-severity issue. If a different editor were handed
-the same source list in a different order, would this article still look the same? If yes, that is a
-red flag for low originality.
+Score originality_score 0-100: 100 means no passage in the article is a verbatim or near-verbatim run
+of words copied from a single source. Only deduct for actual copied wording, never for similarity of
+ideas, examples, or structure.
 
 If you find no issues, return an empty "issues" array and a high originality_score.
 
@@ -190,9 +187,8 @@ const REWRITE_TOOL = {
         type: "string",
         description:
           "The COMPLETE article body in markdown, identical to the original except that every flagged " +
-          "passage has been rewritten to convey the same point/facts using genuinely original phrasing, " +
-          "examples, and rhetorical framing. Every part of the article that was NOT flagged must be " +
-          "reproduced unchanged.",
+          "passage has been reworded so it is no longer a verbatim or near-verbatim copy of the source " +
+          "text. Every part of the article that was NOT flagged must be reproduced unchanged.",
       },
     },
     required: ["content_md"],
@@ -232,18 +228,16 @@ export async function rewriteFlaggedPassages(
     )
     .join("\n\n");
 
-  const systemPrompt = `You are an editor fixing originality flags on a FreelanceAtlas article. You will
+  const systemPrompt = `You are an editor fixing plagiarism flags on a FreelanceAtlas article. You will
 be given the full article body, the list of sources it was researched from, and a list of specific
-passages an originality check flagged as too close to a source (in wording, sentence structure,
-specific examples, or rhetorical framing — not necessarily verbatim copying).
+passages an originality check flagged as verbatim or near-verbatim copies of a source's wording.
 
 Rewrite ONLY the flagged passages:
 - Preserve the same underlying facts, claims, and point being made.
-- Use genuinely original phrasing — do not do a sentence-level synonym swap.
-- If the flagged passage used a specific illustrative example (a persona, industry, scenario, or
-  number) that resembles a source's example, invent a different one of your own.
-- If the flagged passage used a source's rhetorical contrast/definitional device (e.g. "X is a
-  complete statement, Y is not"), invent your own way of making the same point.
+- Reword the passage so it is no longer a verbatim or near-verbatim copy of the source's wording —
+  changing structure, sentence order, or word choice as needed so it reads as your own sentence.
+- You do NOT need to invent new examples or new rhetorical devices — the same example, persona, or
+  framing is fine, as long as the actual wording is no longer copied.
 - Keep the rewritten passage roughly the same length and keep it fitting naturally into the
   surrounding paragraph/list/heading structure.
 - Reproduce every other part of the article — every sentence, heading, and list item that was not
