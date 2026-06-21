@@ -15,6 +15,38 @@ export interface FactCheckResult {
   issues: FactCheckIssue[];
 }
 
+const FACTCHECK_TOOL = {
+  name: "submit_fact_check",
+  description: "Submit the fact-check results for the article.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      accuracy_score: {
+        type: "number",
+        description:
+          "0-100 overall confidence that the article's factual claims are grounded in the supplied sources. 100 = no ungrounded claims.",
+      },
+      needs_review: {
+        type: "boolean",
+        description: 'true if accuracy_score < 90 OR any issue has severity "high".',
+      },
+      issues: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            claim: { type: "string" },
+            concern: { type: "string" },
+            severity: { type: "string", enum: ["low", "medium", "high"] },
+          },
+          required: ["claim", "concern", "severity"],
+        },
+      },
+    },
+    required: ["accuracy_score", "needs_review", "issues"],
+  },
+};
+
 export async function factCheckArticle(
   contentMd: string,
   faqs: { question: string; answer: string }[],
@@ -56,16 +88,9 @@ Flag a claim if:
 Do NOT flag general advice, frameworks, opinions, or recommendations that aren't presented as a cited
 external fact — that is normal blog content, not a factual claim to verify.
 
-Respond with ONLY a JSON object (no markdown fences, no commentary), matching this shape:
-{
-  "accuracy_score": number, // 0-100, your overall confidence that the article's factual claims are
-                             // properly grounded in the supplied sources. 100 = no ungrounded claims.
-  "needs_review": boolean,  // true if accuracy_score < 90 OR any issue has severity "high"
-  "issues": [
-    { "claim": string, "concern": string, "severity": "low" | "medium" | "high" }
-  ]
-}
-If you find no issues, return an empty "issues" array and a high accuracy_score.`;
+If you find no issues, return an empty "issues" array and a high accuracy_score.
+
+Call the submit_fact_check tool exactly once with your results. Do not respond with plain text.`;
 
   const userPrompt = `SOURCES SUPPLIED TO THE WRITER:
 ${sourceBlock}
@@ -76,7 +101,7 @@ ${contentMd}
 FAQS:
 ${faqs.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n")}
 
-Fact-check this article against the supplied sources now.`;
+Fact-check this article against the supplied sources now by calling submit_fact_check.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -89,6 +114,8 @@ Fact-check this article against the supplied sources now.`;
       model: "claude-sonnet-4-6",
       max_tokens: 2048,
       system: systemPrompt,
+      tools: [FACTCHECK_TOOL],
+      tool_choice: { type: "tool", name: "submit_fact_check" },
       messages: [{ role: "user", content: userPrompt }],
     }),
   });
@@ -109,32 +136,29 @@ Fact-check this article against the supplied sources now.`;
   }
 
   const data = await res.json();
-  const raw = data.content?.[0]?.text ?? "{}";
-  const jsonStart = raw.indexOf("{");
-  const jsonEnd = raw.lastIndexOf("}");
+  const toolUse = (data.content ?? []).find((block: any) => block.type === "tool_use");
 
-  try {
-    const parsed = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
-    const issues: FactCheckIssue[] = Array.isArray(parsed.issues) ? parsed.issues : [];
-    const accuracy_score =
-      typeof parsed.accuracy_score === "number" ? parsed.accuracy_score : 0;
-    const needs_review =
-      typeof parsed.needs_review === "boolean"
-        ? parsed.needs_review
-        : accuracy_score < 90 || issues.some((i) => i.severity === "high");
-
-    return { accuracy_score, needs_review, issues };
-  } catch {
+  if (!toolUse) {
     return {
       accuracy_score: 0,
       needs_review: true,
       issues: [
         {
           claim: "(fact-check response unparsable)",
-          concern: "The fact-check model response could not be parsed as JSON.",
+          concern: "The fact-check model did not return a structured tool call.",
           severity: "medium",
         },
       ],
     };
   }
+
+  const parsed = toolUse.input as Partial<FactCheckResult>;
+  const issues: FactCheckIssue[] = Array.isArray(parsed.issues) ? parsed.issues : [];
+  const accuracy_score = typeof parsed.accuracy_score === "number" ? parsed.accuracy_score : 0;
+  const needs_review =
+    typeof parsed.needs_review === "boolean"
+      ? parsed.needs_review
+      : accuracy_score < 90 || issues.some((i) => i.severity === "high");
+
+  return { accuracy_score, needs_review, issues };
 }
