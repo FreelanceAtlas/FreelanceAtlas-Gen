@@ -3,6 +3,7 @@ import { marked } from "marked";
 import { createClient } from "@/lib/supabase/server";
 import { highlightKeywords } from "@/lib/seo";
 import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
+import { FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 import StatusControl from "@/components/StatusControl";
 import RecheckControl from "@/components/RecheckControl";
 
@@ -89,7 +90,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
           </div>
           <p className="mt-1 text-sm text-atlasnavy/70">
             {originalityCheck.needs_review
-              ? `Below the ${ORIGINALITY_PASS_THRESHOLD}/100 publish threshold — publishing is blocked until the flagged passages are rewritten and the article is regenerated, or an editor explicitly overrides it.`
+              ? `Below the ${ORIGINALITY_PASS_THRESHOLD}/100 advisory threshold. This no longer blocks publishing on its own — use "Auto-rewrite flagged passages" or rewrite manually if you want a higher score, but the article can be published as-is.`
               : "Reads as an independent synthesis — no passage traced back to a single source's wording or structure."}
           </p>
 
@@ -129,7 +130,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
             <h2 className="text-lg font-semibold text-atlasnavy">Fact-check</h2>
             <span
               className={`rounded-full px-3 py-1 text-sm font-bold ${
-                factCheck.accuracy_score >= 90
+                factCheck.accuracy_score >= FACT_CHECK_PASS_THRESHOLD
                   ? "bg-emerald-600 text-white"
                   : factCheck.accuracy_score >= 70
                   ? "bg-amber-500 text-white"
@@ -141,8 +142,8 @@ export default async function ArticleDetail({ params }: { params: { slug: string
           </div>
           <p className="mt-1 text-sm text-atlasnavy/70">
             {factCheck.needs_review
-              ? "An editor should review the items below before publishing."
-              : "No unsupported claims found against the supplied sources."}
+              ? `Below the ${FACT_CHECK_PASS_THRESHOLD}/100 publish threshold — this is the actual gate. Publishing is blocked until the flagged claims are fixed and the article is rechecked, or an editor explicitly overrides it.`
+              : "No unsupported or incorrect claims found against the supplied sources."}
           </p>
 
           {factCheck.issues.length > 0 && (
