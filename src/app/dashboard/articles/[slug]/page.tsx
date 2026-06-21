@@ -191,7 +191,17 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       )}
 
       <article
-        className="prose prose-sm mt-6 max-w-none rounded-xl bg-white p-6 shadow-sm prose-headings:text-atlasnavy"
+        className="prose prose-base mt-6 max-w-none rounded-xl bg-white p-6 shadow-sm
+          prose-headings:font-bold prose-headings:text-atlasnavy
+          prose-h1:mt-0 prose-h1:text-3xl
+          prose-h2:mt-10 prose-h2:text-2xl prose-h2:border-b prose-h2:border-atlasnavy/10 prose-h2:pb-2
+          prose-h3:mt-7 prose-h3:text-xl
+          prose-h4:mt-5 prose-h4:text-lg
+          prose-p:leading-relaxed prose-p:text-atlasnavy/90
+          prose-a:text-atlasteal prose-a:no-underline hover:prose-a:underline
+          prose-strong:text-atlasnavy
+          prose-li:my-1
+          prose-blockquote:border-atlasteal prose-blockquote:text-atlasnavy/70"
         dangerouslySetInnerHTML={{ __html: bodyHtml }}
       />
 
