@@ -13,11 +13,41 @@ interface FetchedSource {
   authorityNote: string;
 }
 
+// Stopwords + short tokens are excluded so relevance matching isn't fooled by
+// generic filler words ("best", "for", "how") that appear in almost every topic.
+const STOPWORDS = new Set([
+  "the", "for", "and", "with", "that", "this", "from", "your", "best", "top",
+  "how", "what", "are", "you", "can", "vs", "a", "an", "to", "of", "in", "on",
+  "is", "it", "be", "do", "does", "or", "as", "at", "by",
+]);
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+}
+
+// A bank keyword is "relevant" to the chosen topic if it shares at least one
+// meaningful word with it. Deliberately conservative — if nothing overlaps,
+// it's left out rather than guessed at.
+function isRelevant(keyword: string, primaryKeyword: string): boolean {
+  const kwTokens = new Set(tokenize(keyword));
+  const topicTokens = new Set(tokenize(primaryKeyword));
+  if (kwTokens.size === 0 || topicTokens.size === 0) return false;
+  for (const token of kwTokens) {
+    if (topicTokens.has(token)) return true;
+  }
+  return false;
+}
+
 export default function GenerateForm({ clusters, keywords }: { clusters: Cluster[]; keywords: KeywordRow[] }) {
   const router = useRouter();
   const [clusterId, setClusterId] = useState(clusters[0]?.id ?? "");
   const [primaryKeyword, setPrimaryKeyword] = useState("");
   const [supporting, setSupporting] = useState("");
+  const [suggestionMessage, setSuggestionMessage] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [sourcesText, setSourcesText] = useState("");
   const [fetchedSources, setFetchedSources] = useState<FetchedSource[]>([]);
@@ -37,6 +67,36 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     const choices = pool.length > 0 ? pool : clusterKeywords;
     const pick = choices[Math.floor(Math.random() * choices.length)];
     setPrimaryKeyword(pick.keyword);
+  }
+
+  // Pulls unused keywords from this cluster's bank into the Supporting field,
+  // but only the ones actually relevant to the chosen topic. If none qualify,
+  // nothing gets added — better an empty suggestion than a noisy one.
+  function suggestSupportingKeywords() {
+    setSuggestionMessage(null);
+    if (!primaryKeyword || clusterKeywords.length === 0) return;
+
+    const existing = new Set(
+      supporting.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+    );
+
+    const relevant = clusterKeywords.filter(
+      (k) =>
+        k.keyword.toLowerCase() !== primaryKeyword.toLowerCase() &&
+        !existing.has(k.keyword.toLowerCase()) &&
+        isRelevant(k.keyword, primaryKeyword)
+    );
+
+    if (relevant.length === 0) {
+      setSuggestionMessage("No unused keywords in this cluster look relevant to that topic — none added.");
+      return;
+    }
+
+    const additions = relevant.map((k) => k.keyword).join(", ");
+    setSupporting((prev) => (prev.trim() ? `${prev.trim()}, ${additions}` : additions));
+    setSuggestionMessage(
+      `Added ${relevant.length} relevant keyword${relevant.length > 1 ? "s" : ""} from the bank.`
+    );
   }
 
   function parseSources() {
@@ -177,12 +237,24 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (comma separated)</label>
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (comma separated)</label>
+            <button
+              type="button"
+              onClick={suggestSupportingKeywords}
+              disabled={!primaryKeyword || clusterKeywords.length === 0}
+              title="Import unused keywords from this cluster's bank that are actually relevant to the topic above"
+              className="ml-3 shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50"
+            >
+              Add relevant from bank
+            </button>
+          </div>
           <input
             value={supporting}
             onChange={(e) => setSupporting(e.target.value)}
             className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm"
           />
+          {suggestionMessage && <p className="mt-1 text-xs text-atlasnavy/50">{suggestionMessage}</p>}
         </div>
 
         <div>
