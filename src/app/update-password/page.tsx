@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 export default function UpdatePasswordPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -18,6 +19,16 @@ export default function UpdatePasswordPage() {
   // resolve immediately. We also listen for onAuthStateChange as a safety
   // net in case the session is still settling on first render.
   useEffect(() => {
+    const authError = searchParams.get("auth_error");
+    if (authError) {
+      setError(
+        authError === "no_code"
+          ? "This reset link is missing its security code. Request a new one from the Forgot password page."
+          : `Reset link error: ${authError}`
+      );
+      return;
+    }
+
     let active = true;
 
     supabase.auth.getSession().then(({ data }) => {
@@ -45,7 +56,7 @@ export default function UpdatePasswordPage() {
       listener.subscription.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supabase]);
+  }, [supabase, searchParams]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
