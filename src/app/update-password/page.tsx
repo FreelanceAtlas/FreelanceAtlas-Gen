@@ -13,18 +13,38 @@ export default function UpdatePasswordPage() {
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
 
-  // Supabase exchanges the recovery link for a session automatically
-  // (detectSessionInUrl). Confirm a session actually exists before
-  // letting the user submit a new password.
+  // By the time the user lands here, /auth/callback has already exchanged
+  // the PKCE code for a session and set the cookie, so getSession() should
+  // resolve immediately. We also listen for onAuthStateChange as a safety
+  // net in case the session is still settling on first render.
   useEffect(() => {
+    let active = true;
+
     supabase.auth.getSession().then(({ data }) => {
-      setReady(!!data.session);
-      if (!data.session) {
+      if (!active) return;
+      if (data.session) {
+        setReady(true);
+      }
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session) setReady(true);
+    });
+
+    const timeout = setTimeout(() => {
+      if (active && !ready) {
         setError(
           "This reset link is invalid or has expired. Request a new one from the Forgot password page."
         );
       }
-    });
+    }, 3000);
+
+    return () => {
+      active = false;
+      clearTimeout(timeout);
+      listener.subscription.unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
 
   async function handleSubmit(e: React.FormEvent) {
