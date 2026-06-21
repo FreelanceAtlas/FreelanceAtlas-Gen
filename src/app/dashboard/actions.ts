@@ -93,10 +93,12 @@ export async function updateArticleContent(
 //
 // When the move to "published" actually goes through (gates passed, or
 // force === true), this also re-sanitizes h1/meta/content_md as a last
-// defensive pass for em dashes and stray dash-hyphens. The [n] keyword
-// reference markers are a display-only overlay (applied by highlightKeywords
-// at render time, never stored in content_md), so they're hidden for
-// published articles directly in the page render rather than here.
+// defensive pass for em dashes and stray dash-hyphens, and clears any pending
+// scheduled_publish_at (the article is already published, so there is
+// nothing left to auto-publish). The [n] keyword reference markers are a
+// display-only overlay (applied by highlightKeywords at render time, never
+// stored in content_md), so they're hidden for published articles directly
+// in the page render rather than here.
 export async function updateArticleStatus(articleId: string, status: string, force = false) {
   const supabase = createClient();
 
@@ -158,6 +160,7 @@ export async function updateArticleStatus(articleId: string, status: string, for
         meta_title: stripDashes(current?.meta_title ?? ""),
         meta_description: stripDashes(current?.meta_description ?? ""),
         content_md: stripDashes(current?.content_md ?? ""),
+        scheduled_publish_at: null,
       })
       .eq("id", articleId);
     if (error) throw new Error(error.message);
@@ -261,4 +264,63 @@ export async function rewriteFlaggedOriginality(articleId: string) {
   revalidatePath(`/dashboard/articles/${article.slug}`);
 
   return { originalityCheck, factCheck };
+}
+
+// Schedule a draft (or review) article to auto-publish at a future date/time.
+// The actual publish is performed later by the /api/cron/publish-scheduled
+// route (triggered by Vercel Cron), which applies the same gate checks and
+// sanitize-and-publish logic as a manual "Publish anyway" would. Refuses to
+// schedule an already-published article and refuses a time in the past.
+export async function scheduleArticle(articleId: string, isoDatetime: string) {
+  const when = new Date(isoDatetime);
+  if (Number.isNaN(when.getTime())) {
+    throw new Error("Invalid date/time.");
+  }
+  if (when.getTime() <= Date.now()) {
+    throw new Error("Scheduled time must be in the future.");
+  }
+
+  const supabase = createClient();
+
+  const { data: article, error: fetchError } = await supabase
+    .from("articles")
+    .select("status")
+    .eq("id", articleId)
+    .single();
+  if (fetchError) throw new Error(fetchError.message);
+  if (!article) throw new Error("Article not found");
+  if (article.status === "published") {
+    throw new Error("This article is already published.");
+  }
+
+  const { error } = await supabase
+    .from("articles")
+    .update({ scheduled_publish_at: when.toISOString() })
+    .eq("id", articleId);
+  if (error) throw new Error(error.message);
+
+  revalidatePath("/dashboard/articles");
+}
+
+export async function unscheduleArticle(articleId: string) {
+  const supabase = createClient();
+  const { error } = await supabase
+    .from("articles")
+    .update({ scheduled_publish_at: null })
+    .eq("id", articleId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard/articles");
+}
+
+// Permanently deletes the given articles. Used by the bulk-select toolbar on
+// the Articles list. Irreversible — the client is expected to confirm with
+// the user before calling this.
+export async function bulkDeleteArticles(articleIds: string[]) {
+  if (!articleIds || articleIds.length === 0) return;
+
+  const supabase = createClient();
+  const { error } = await supabase.from("articles").delete().in("id", articleIds);
+  if (error) throw new Error(error.message);
+
+  revalidatePath("/dashboard/articles");
 }
