@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { highlightKeywords } from "@/lib/seo";
 import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import StatusControl from "@/components/StatusControl";
+import RecheckControl from "@/components/RecheckControl";
 
 export default async function ArticleDetail({ params }: { params: { slug: string } }) {
   const supabase = createClient();
@@ -52,7 +53,10 @@ export default async function ArticleDetail({ params }: { params: { slug: string
             dangerouslySetInnerHTML={{ __html: h1Html }}
           />
         </div>
-        <StatusControl articleId={article.id} status={article.status} />
+        <div>
+          <StatusControl articleId={article.id} status={article.status} />
+          <RecheckControl articleId={article.id} />
+        </div>
       </div>
 
       <div className="mt-4 rounded-xl bg-white p-4 text-sm shadow-sm">
