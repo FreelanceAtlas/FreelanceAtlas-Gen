@@ -179,3 +179,133 @@ Check this article for originality against the supplied sources now by calling s
 
   return { originality_score, needs_review, issues };
 }
+
+const REWRITE_TOOL = {
+  name: "submit_rewritten_article",
+  description: "Submit the full article body with the flagged passages rewritten.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      content_md: {
+        type: "string",
+        description:
+          "The COMPLETE article body in markdown, identical to the original except that every flagged " +
+          "passage has been rewritten to convey the same point/facts using genuinely original phrasing, " +
+          "examples, and rhetorical framing. Every part of the article that was NOT flagged must be " +
+          "reproduced unchanged.",
+      },
+    },
+    required: ["content_md"],
+  },
+};
+
+// Rewrites only the passages a prior checkOriginality call flagged, leaving the rest of the
+// article untouched, so an editor doesn't have to manually retype flagged excerpts. Fail-soft:
+// on any failure this returns the original contentMd unchanged (never partially-applied or
+// corrupted output), so the caller can safely overwrite content_md with the return value.
+export async function rewriteFlaggedPassages(
+  contentMd: string,
+  issues: OriginalityIssue[],
+  sources: { url: string; title: string; publishedDate?: string }[]
+): Promise<{ content_md: string; rewritten: boolean; error?: string }> {
+  if (issues.length === 0) {
+    return { content_md: contentMd, rewritten: false };
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      content_md: contentMd,
+      rewritten: false,
+      error: "ANTHROPIC_API_KEY is not configured, so the rewrite could not run.",
+    };
+  }
+
+  const sourceBlock = sources.length
+    ? sources.map((s) => `- ${s.title} (${s.publishedDate ?? "date unknown"}): ${s.url}`).join("\n")
+    : "No sources were supplied.";
+
+  const issueBlock = issues
+    .map(
+      (issue, i) =>
+        `${i + 1}. Excerpt: "${issue.excerpt}"\n   Resembles: ${issue.likely_source}\n   Concern: ${issue.concern}`
+    )
+    .join("\n\n");
+
+  const systemPrompt = `You are an editor fixing originality flags on a FreelanceAtlas article. You will
+be given the full article body, the list of sources it was researched from, and a list of specific
+passages an originality check flagged as too close to a source (in wording, sentence structure,
+specific examples, or rhetorical framing — not necessarily verbatim copying).
+
+Rewrite ONLY the flagged passages:
+- Preserve the same underlying facts, claims, and point being made.
+- Use genuinely original phrasing — do not do a sentence-level synonym swap.
+- If the flagged passage used a specific illustrative example (a persona, industry, scenario, or
+  number) that resembles a source's example, invent a different one of your own.
+- If the flagged passage used a source's rhetorical contrast/definitional device (e.g. "X is a
+  complete statement, Y is not"), invent your own way of making the same point.
+- Keep the rewritten passage roughly the same length and keep it fitting naturally into the
+  surrounding paragraph/list/heading structure.
+- Reproduce every other part of the article — every sentence, heading, and list item that was not
+  flagged — completely unchanged, verbatim.
+
+Call submit_rewritten_article exactly once with the full article body. Do not respond with plain text.`;
+
+  const userPrompt = `SOURCES THE ARTICLE WAS RESEARCHED FROM:
+${sourceBlock}
+
+FULL ARTICLE BODY:
+${contentMd}
+
+FLAGGED PASSAGES TO REWRITE:
+${issueBlock}
+
+Return the full article body with only these passages rewritten, by calling submit_rewritten_article.`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8192,
+      system: systemPrompt,
+      tools: [REWRITE_TOOL],
+      tool_choice: { type: "tool", name: "submit_rewritten_article" },
+      messages: [{ role: "user", content: userPrompt }],
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    return {
+      content_md: contentMd,
+      rewritten: false,
+      error: `Rewrite request failed (${res.status}): ${text.slice(0, 200)}`,
+    };
+  }
+
+  const data = await res.json();
+
+  if (data.stop_reason === "max_tokens") {
+    return {
+      content_md: contentMd,
+      rewritten: false,
+      error: "Rewrite was cut off because it exceeded the model's output limit.",
+    };
+  }
+
+  const toolUse = (data.content ?? []).find((block: any) => block.type === "tool_use");
+  if (!toolUse || typeof toolUse.input?.content_md !== "string" || !toolUse.input.content_md.trim()) {
+    return {
+      content_md: contentMd,
+      rewritten: false,
+      error: "The rewrite model did not return a structured tool call.",
+    };
+  }
+
+  return { content_md: toolUse.input.content_md, rewritten: true };
+}
