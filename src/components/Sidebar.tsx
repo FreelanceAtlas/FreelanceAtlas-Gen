@@ -5,6 +5,16 @@ export default async function Sidebar() {
   const supabase = createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
+  let role: string | null = null;
+  if (user) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", user.id)
+      .maybeSingle();
+    role = profile?.role ?? null;
+  }
+
   return (
     <aside className="flex w-56 flex-col justify-between border-r border-atlasnavy/10 bg-white p-5">
       <div>
@@ -16,6 +26,9 @@ export default async function Sidebar() {
           <Link href="/dashboard/articles" className="rounded-md px-3 py-2 hover:bg-atlassand">Articles</Link>
           <Link href="/dashboard/clusters" className="rounded-md px-3 py-2 hover:bg-atlassand">Clusters & keywords</Link>
           <Link href="/dashboard/affiliate-links" className="rounded-md px-3 py-2 hover:bg-atlassand">Affiliate links</Link>
+          {role === "admin" && (
+            <Link href="/dashboard/users" className="rounded-md px-3 py-2 hover:bg-atlassand">Users</Link>
+          )}
         </nav>
       </div>
       <div className="text-xs text-atlasnavy/50">{user?.email}</div>
