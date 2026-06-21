@@ -1,32 +1,47 @@
-import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
+import { FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
+import ArticlesManager, { ArticleRow } from "@/components/ArticlesManager";
 
 export default async function ArticlesPage() {
   const supabase = createClient();
   const { data: articles } = await supabase
     .from("articles")
-    .select("id, title, slug, status, created_at, clusters(name)")
+    .select(
+      "id, title, slug, status, created_at, scheduled_publish_at, originality_check, fact_check, clusters(name)"
+    )
     .order("created_at", { ascending: false });
+
+  const rows: ArticleRow[] = (articles ?? []).map((a: any) => {
+    const originality = a.originality_check as { originality_score: number; needs_review: boolean } | null;
+    const factCheck = a.fact_check as { accuracy_score: number; needs_review: boolean } | null;
+
+    const originalityOk =
+      !!originality && !originality.needs_review && originality.originality_score >= ORIGINALITY_PASS_THRESHOLD;
+    const factCheckOk =
+      !!factCheck && !factCheck.needs_review && factCheck.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
+
+    return {
+      id: a.id,
+      title: a.title,
+      slug: a.slug,
+      status: a.status,
+      clusterName: a.clusters?.name ?? null,
+      originalityScore: originality?.originality_score ?? null,
+      originalityNeedsReview: originality?.needs_review ?? false,
+      factCheckScore: factCheck?.accuracy_score ?? null,
+      factCheckNeedsReview: factCheck?.needs_review ?? false,
+      scheduledPublishAt: a.scheduled_publish_at ?? null,
+      ready: originalityOk && factCheckOk,
+    };
+  });
 
   return (
     <div>
       <h1 className="text-2xl font-bold text-atlasnavy">Articles</h1>
-      <ul className="mt-6 divide-y divide-atlasnavy/10 rounded-xl bg-white shadow-sm">
-        {(articles ?? []).map((a: any) => (
-          <li key={a.id} className="flex items-center justify-between px-5 py-3 text-sm">
-            <Link href={`/dashboard/articles/${a.slug}`} className="font-medium text-atlasnavy hover:underline">
-              {a.title}
-            </Link>
-            <div className="flex items-center gap-3 text-xs text-atlasnavy/50">
-              <span>{a.clusters?.name}</span>
-              <span className="rounded-full bg-atlassand px-2 py-0.5 capitalize">{a.status}</span>
-            </div>
-          </li>
-        ))}
-        {(!articles || articles.length === 0) && (
-          <li className="px-5 py-3 text-sm text-atlasnavy/50">No articles yet.</li>
-        )}
-      </ul>
+      <div className="mt-6">
+        <ArticlesManager articles={rows} />
+      </div>
     </div>
   );
 }
