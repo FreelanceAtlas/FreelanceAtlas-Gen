@@ -19,7 +19,7 @@ export default function StatusControl({ articleId, status }: { articleId: string
       router.refresh();
     } catch (err: any) {
       const message = err?.message ?? "Could not update status";
-      if (message.startsWith("Originality gate:") && !force) {
+      if (message.startsWith("Fact-check gate:") && !force) {
         const confirmed = window.confirm(`${message}\n\nPublish anyway?`);
         if (confirmed) {
           await update(next, true);
