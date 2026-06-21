@@ -47,6 +47,14 @@ const FACTCHECK_TOOL = {
   },
 };
 
+function failSoft(claim: string, concern: string): FactCheckResult {
+  return {
+    accuracy_score: 0,
+    needs_review: true,
+    issues: [{ claim, concern, severity: "medium" }],
+  };
+}
+
 export async function factCheckArticle(
   contentMd: string,
   faqs: { question: string; answer: string }[],
@@ -56,17 +64,10 @@ export async function factCheckArticle(
   if (!apiKey) {
     // Fact-checking is a non-blocking enhancement — fail soft rather than
     // breaking generation if the key is somehow missing at this call site.
-    return {
-      accuracy_score: 0,
-      needs_review: true,
-      issues: [
-        {
-          claim: "(fact-check not run)",
-          concern: "ANTHROPIC_API_KEY is not configured, so the fact-check pass could not run.",
-          severity: "medium",
-        },
-      ],
-    };
+    return failSoft(
+      "(fact-check not run)",
+      "ANTHROPIC_API_KEY is not configured, so the fact-check pass could not run."
+    );
   }
 
   const sourceBlock = sources.length
@@ -112,7 +113,7 @@ Fact-check this article against the supplied sources now by calling submit_fact_
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 2048,
+      max_tokens: 8192,
       system: systemPrompt,
       tools: [FACTCHECK_TOOL],
       tool_choice: { type: "tool", name: "submit_fact_check" },
@@ -122,34 +123,25 @@ Fact-check this article against the supplied sources now by calling submit_fact_
 
   if (!res.ok) {
     const text = await res.text();
-    return {
-      accuracy_score: 0,
-      needs_review: true,
-      issues: [
-        {
-          claim: "(fact-check failed)",
-          concern: `Fact-check request failed (${res.status}): ${text.slice(0, 200)}`,
-          severity: "medium",
-        },
-      ],
-    };
+    return failSoft("(fact-check failed)", `Fact-check request failed (${res.status}): ${text.slice(0, 200)}`);
   }
 
   const data = await res.json();
+
+  if (data.stop_reason === "max_tokens") {
+    return failSoft(
+      "(fact-check not completed)",
+      "Fact-check was cut off because it exceeded the model's output limit."
+    );
+  }
+
   const toolUse = (data.content ?? []).find((block: any) => block.type === "tool_use");
 
   if (!toolUse) {
-    return {
-      accuracy_score: 0,
-      needs_review: true,
-      issues: [
-        {
-          claim: "(fact-check response unparsable)",
-          concern: "The fact-check model did not return a structured tool call.",
-          severity: "medium",
-        },
-      ],
-    };
+    return failSoft(
+      "(fact-check response unparsable)",
+      "The fact-check model did not return a structured tool call."
+    );
   }
 
   const parsed = toolUse.input as Partial<FactCheckResult>;
