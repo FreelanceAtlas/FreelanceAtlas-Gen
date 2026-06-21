@@ -3,7 +3,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
 import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
-import { checkOriginality } from "@/lib/originality";
+import { checkOriginality, rewriteFlaggedPassages } from "@/lib/originality";
 import { factCheckArticle } from "@/lib/factcheck";
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
@@ -108,6 +108,60 @@ export async function recheckArticleChecks(articleId: string) {
   const { error: updateError } = await supabase
     .from("articles")
     .update({ originality_check: originalityCheck, fact_check: factCheck })
+    .eq("id", articleId);
+
+  if (updateError) throw new Error(updateError.message);
+
+  revalidatePath(`/dashboard/articles/${article.slug}`);
+
+  return { originalityCheck, factCheck };
+}
+
+// Auto-rewrite: takes the article's CURRENT originality_check.issues (whatever the last
+// check found) and asks the model to rewrite just those flagged passages — same facts,
+// original phrasing/examples/framing — leaving the rest of the article untouched. Saves
+// the new content_md, then re-runs both checks against it so the panel reflects the
+// rewrite immediately, in the same row (no new article created).
+export async function rewriteFlaggedOriginality(articleId: string) {
+  const supabase = createClient();
+
+  const { data: article, error: fetchError } = await supabase
+    .from("articles")
+    .select("content_md, faqs, sources, slug, originality_check")
+    .eq("id", articleId)
+    .single();
+
+  if (fetchError) throw new Error(fetchError.message);
+  if (!article) throw new Error("Article not found");
+
+  const sources = article.sources ?? [];
+  const faqs = article.faqs ?? [];
+  const existingCheck = article.originality_check as
+    | { issues?: { excerpt: string; likely_source: string; concern: string; severity: "low" | "medium" | "high" }[] }
+    | null;
+  const issues = existingCheck?.issues ?? [];
+
+  if (issues.length === 0) {
+    throw new Error("No flagged passages to rewrite — run a recheck first, or this article has none.");
+  }
+
+  const rewrite = await rewriteFlaggedPassages(article.content_md, issues, sources);
+  if (!rewrite.rewritten) {
+    throw new Error(rewrite.error ?? "Rewrite did not produce any changes.");
+  }
+
+  const [originalityCheck, factCheck] = await Promise.all([
+    checkOriginality(rewrite.content_md, sources),
+    factCheckArticle(rewrite.content_md, faqs, sources),
+  ]);
+
+  const { error: updateError } = await supabase
+    .from("articles")
+    .update({
+      content_md: rewrite.content_md,
+      originality_check: originalityCheck,
+      fact_check: factCheck,
+    })
     .eq("id", articleId);
 
   if (updateError) throw new Error(updateError.message);
