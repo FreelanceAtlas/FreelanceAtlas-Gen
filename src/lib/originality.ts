@@ -144,7 +144,7 @@ Check this article for originality against the supplied sources now by calling s
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 2048,
+      max_tokens: 8192,
       system: systemPrompt,
       tools: [ORIGINALITY_TOOL],
       tool_choice: { type: "tool", name: "submit_originality_check" },
