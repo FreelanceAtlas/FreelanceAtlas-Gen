@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import KeywordStatusControl from "@/components/KeywordStatusControl";
 
 export default async function ClustersPage() {
   const supabase = createClient();
@@ -11,7 +12,8 @@ export default async function ClustersPage() {
       <p className="mt-1 text-sm text-atlasnavy/60">
         Pillar-cluster topic map seeded from the live freelanceatlas.com blog audit, plus keyword
         gaps sourced from Wordstream, SEMrush Keyword Magic, Wordtracker, Ahrefs Keyword Generator,
-        and Seobility.
+        and Seobility. Keywords are never deleted here — "Used" ones can be reverted back to
+        "Available" so they stay in the bank for a future draft.
       </p>
 
       <div className="mt-6 grid grid-cols-2 gap-6">
@@ -35,7 +37,9 @@ export default async function ClustersPage() {
                     <tr key={k.id} className="border-t border-atlasnavy/5">
                       <td className="py-1 text-blue-600 font-medium">{k.keyword}</td>
                       <td className="py-1 capitalize">{k.search_intent}</td>
-                      <td className="py-1">{k.is_used ? "Used" : "Available"}</td>
+                      <td className="py-1">
+                        <KeywordStatusControl keywordId={k.id} isUsed={!!k.is_used} />
+                      </td>
                     </tr>
                   ))}
               </tbody>
