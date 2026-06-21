@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 interface Cluster { id: string; name: string; }
-interface KeywordRow { id: string; keyword: string; cluster_id: string; }
+interface KeywordRow { id: string; keyword: string; cluster_id: string; is_used?: boolean; }
 interface FetchedSource {
   url: string;
   title: string;
@@ -58,7 +58,15 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [duplicateMatches, setDuplicateMatches] = useState<{ title: string; slug: string; score: number }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Suggest a topic and the bank pills draw from every keyword in the
+  // cluster, used or not — a cluster that's fully used should still be able
+  // to suggest a topic (duplicate-content protection happens later, at
+  // submit time, via title similarity matching against existing posts).
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
+  // Only genuinely unused keywords are eligible to be auto-imported as
+  // supporting keywords — that feature exists specifically to recycle
+  // research that hasn't made it into an article yet.
+  const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
 
   function suggestTopic() {
     if (clusterKeywords.length === 0) return;
@@ -74,13 +82,13 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   // nothing gets added — better an empty suggestion than a noisy one.
   function suggestSupportingKeywords() {
     setSuggestionMessage(null);
-    if (!primaryKeyword || clusterKeywords.length === 0) return;
+    if (!primaryKeyword || unusedClusterKeywords.length === 0) return;
 
     const existing = new Set(
       supporting.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
     );
 
-    const relevant = clusterKeywords.filter(
+    const relevant = unusedClusterKeywords.filter(
       (k) =>
         k.keyword.toLowerCase() !== primaryKeyword.toLowerCase() &&
         !existing.has(k.keyword.toLowerCase()) &&
@@ -206,6 +214,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
                     }`}
                   >
                     {k.keyword}
+                    {k.is_used && <span className="ml-1 text-atlasnavy/40">(used)</span>}
                   </button>
                 ))}
               </div>
@@ -242,7 +251,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             <button
               type="button"
               onClick={suggestSupportingKeywords}
-              disabled={!primaryKeyword || clusterKeywords.length === 0}
+              disabled={!primaryKeyword || unusedClusterKeywords.length === 0}
               title="Import unused keywords from this cluster's bank that are actually relevant to the topic above"
               className="ml-3 shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50"
             >
