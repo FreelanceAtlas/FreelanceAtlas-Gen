@@ -35,6 +35,8 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       }
     | null;
 
+  const hasFlaggedIssues = (originalityCheck?.issues?.length ?? 0) > 0;
+
   const severityStyles: Record<string, string> = {
     high: "bg-red-100 text-red-700",
     medium: "bg-amber-100 text-amber-700",
@@ -55,7 +57,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         </div>
         <div>
           <StatusControl articleId={article.id} status={article.status} />
-          <RecheckControl articleId={article.id} />
+          <RecheckControl articleId={article.id} hasFlaggedIssues={hasFlaggedIssues} />
         </div>
       </div>
 
