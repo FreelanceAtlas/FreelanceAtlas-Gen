@@ -2,6 +2,8 @@
 // prompt, enforces SEO structure, and returns a strict JSON shape we can
 // store directly in the `articles` table.
 
+import { stripDashes } from "./textClean";
+
 export interface GenerateInput {
   clusterName: string;
   primaryKeyword: string;
@@ -42,6 +44,17 @@ VOICE
 - Short paragraphs (2-4 sentences), scannable subheads, concrete numbers/examples over generalities.
 - No invented statistics. Only cite facts that are present in the supplied sources; otherwise speak
   in terms of frameworks, ranges, and reasoning rather than fabricated data points.
+
+FORMATTING (mandatory)
+- Never use an em dash anywhere in the output, in any field. Join clauses with a period, a comma,
+  or a connector word ("and", "but", "so") instead.
+- Never use a hyphen surrounded by spaces, or a double hyphen, as a substitute for a dash. A hyphen
+  may only appear with no surrounding whitespace, inside a normal compound word (e.g.
+  "well-formatted", "e-commerce", "non-negotiable") or as a markdown list bullet at the start of a
+  line ("- like this").
+- Every section of content_md must use real markdown heading syntax (## for each H2, ### for any
+  H3 subsection) per the REQUIRED POST STRUCTURE below — never fake a heading with bold text alone,
+  and never leave a stretch of body copy without a heading above it.
 
 REQUIRED POST STRUCTURE for content_md (this mirrors the live FreelanceAtlas template exactly):
 1. Open with a short hook: a direct question or blunt claim restating the primary keyword's topic,
@@ -111,7 +124,7 @@ style preference):
 - Never invent studies, statistics, performance claims, or "expert consensus" that isn't in the
   supplied sources.
 - Before finalizing, mentally re-read your draft and rewrite any sentence, example, or rhetorical
-  device that still resembles — even loosely, even reworded — something from one specific source.
+  device that still resembles, even loosely, even reworded, something from one specific source.
 - The finished article should read like an independently written expert guide — not a rewritten
   compilation of the source material. A different editor handed the same source list in a different
   order should still arrive at a differently structured article with different examples.
@@ -180,6 +193,24 @@ const ARTICLE_TOOL = {
     ],
   },
 };
+
+// Safety net behind the FORMATTING rules in SYSTEM_PROMPT: strips any em dash
+// or stray dash-hyphen that slipped through generation, across every text
+// field the model returns (not just content_md).
+function sanitizeGeneratedArticle(article: GeneratedArticle): GeneratedArticle {
+  return {
+    ...article,
+    title: stripDashes(article.title),
+    meta_title: stripDashes(article.meta_title),
+    meta_description: stripDashes(article.meta_description),
+    h1: stripDashes(article.h1),
+    content_md: stripDashes(article.content_md),
+    faqs: (article.faqs ?? []).map((f) => ({
+      question: stripDashes(f.question),
+      answer: stripDashes(f.answer),
+    })),
+  };
+}
 
 export async function generateArticle(input: GenerateInput): Promise<GeneratedArticle> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -251,5 +282,5 @@ Write the full FreelanceAtlas blog post now by calling submit_article.`;
     );
   }
 
-  return toolUse.input as GeneratedArticle;
+  return sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
 }
