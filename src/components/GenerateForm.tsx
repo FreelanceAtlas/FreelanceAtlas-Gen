@@ -30,6 +30,15 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
 
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
 
+  function suggestTopic() {
+    if (clusterKeywords.length === 0) return;
+    // Avoid re-suggesting the keyword that's already in the box, if there's another option.
+    const pool = clusterKeywords.filter((k) => k.keyword !== primaryKeyword);
+    const choices = pool.length > 0 ? pool : clusterKeywords;
+    const pick = choices[Math.floor(Math.random() * choices.length)];
+    setPrimaryKeyword(pick.keyword);
+  }
+
   function parseSources() {
     return sourcesText
       .split("\n")
@@ -122,20 +131,49 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             ))}
           </select>
           {clusterKeywords.length > 0 && (
-            <p className="mt-1 text-xs text-atlasnavy/50">
-              Bank: {clusterKeywords.map((k) => k.keyword).join(", ")}
-            </p>
+            <div className="mt-2">
+              <p className="text-xs text-atlasnavy/50">Bank — click one to use it, or write your own below:</p>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {clusterKeywords.map((k) => (
+                  <button
+                    key={k.id}
+                    type="button"
+                    onClick={() => setPrimaryKeyword(k.keyword)}
+                    className={`rounded-full border px-2.5 py-1 text-xs ${
+                      primaryKeyword === k.keyword
+                        ? "border-atlasteal bg-atlasteal/10 text-atlasteal font-semibold"
+                        : "border-atlasnavy/20 text-atlasnavy/70 hover:bg-atlasnavy/5"
+                    }`}
+                  >
+                    {k.keyword}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-atlasnavy">Primary keyword / topic</label>
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-atlasnavy">Primary keyword / topic</label>
+            <button
+              type="button"
+              onClick={suggestTopic}
+              disabled={clusterKeywords.length === 0}
+              className="ml-3 shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50"
+            >
+              Suggest a topic
+            </button>
+          </div>
           <input
             value={primaryKeyword}
             onChange={(e) => setPrimaryKeyword(e.target.value)}
             placeholder="e.g. best invoicing software for freelancers 2026"
             className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm"
           />
+          <p className="mt-1 text-xs text-atlasnavy/40">
+            Pick a topic from the bank above, hit "Suggest a topic" for a random one, or just type your own.
+          </p>
         </div>
 
         <div>
