@@ -10,9 +10,23 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
  * component or exposed to the browser.
  */
 export function createClient() {
-  return createSupabaseClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { persistSession: false } }
-  );
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    console.error(
+      "[supabase/server] missing env vars",
+      JSON.stringify({
+        SUPABASE_URL_present: !!url,
+        SUPABASE_URL_length: url?.length ?? 0,
+        SUPABASE_SERVICE_ROLE_KEY_present: !!key,
+        SUPABASE_SERVICE_ROLE_KEY_length: key?.length ?? 0,
+        all_env_keys_containing_supabase: Object.keys(process.env).filter((k) =>
+          k.toLowerCase().includes("supabase")
+        ),
+      })
+    );
+  }
+
+  return createSupabaseClient(url!, key!, { auth: { persistSession: false } });
 }
