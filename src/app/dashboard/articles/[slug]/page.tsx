@@ -6,6 +6,7 @@ import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import { FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 import StatusControl from "@/components/StatusControl";
 import RecheckControl from "@/components/RecheckControl";
+import EditArticleControl from "@/components/EditArticleControl";
 
 export default async function ArticleDetail({ params }: { params: { slug: string } }) {
   const supabase = createClient();
@@ -21,8 +22,13 @@ export default async function ArticleDetail({ params }: { params: { slug: string
     marker: k.marker,
     usedAs: k.usedAs ?? k.keyword,
   }));
-  const bodyHtml = highlightKeywords(marked.parse(article.content_md) as string, markerEntries);
-  const h1Html = highlightKeywords(article.h1, markerEntries);
+  // The [n] reference markers are an editorial-review overlay only — once an
+  // article is published, the live view should read clean with no markers.
+  const showMarkers = article.status !== "published";
+  const bodyHtml = showMarkers
+    ? highlightKeywords(marked.parse(article.content_md) as string, markerEntries)
+    : (marked.parse(article.content_md) as string);
+  const h1Html = showMarkers ? highlightKeywords(article.h1, markerEntries) : article.h1;
 
   const factCheck = article.fact_check as
     | { accuracy_score: number; needs_review: boolean; issues: { claim: string; concern: string; severity: "low" | "medium" | "high" }[] }
@@ -67,6 +73,14 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Meta description:</span> {article.meta_description}</p>
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Slug:</span> /{article.slug}</p>
       </div>
+
+      <EditArticleControl
+        articleId={article.id}
+        h1={article.h1}
+        metaTitle={article.meta_title}
+        metaDescription={article.meta_description}
+        contentMd={article.content_md}
+      />
 
       {originalityCheck && (
         <div
@@ -198,10 +212,13 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-atlasnavy">Keyword reference table</h2>
         <p className="mt-1 text-xs text-atlasnavy/50">
-          Every keyword rendered in blue above carries a numbered marker ([n]) tying it back to a row
+          {showMarkers
+            ? `Every keyword rendered in blue above carries a numbered marker ([n]) tying it back to a row
           here. "Original" is the researched target keyword; "Used as" is the literal text written
           into the article — they only differ when a keyword was merged with another or swapped for a
-          synonym, which is flagged below.
+          synonym, which is flagged below.`
+            : `This article is published, so the [n] markers are hidden from the live view above. This table
+          remains for internal reference.`}
         </p>
         <table className="mt-3 w-full text-left text-sm">
           <thead>
