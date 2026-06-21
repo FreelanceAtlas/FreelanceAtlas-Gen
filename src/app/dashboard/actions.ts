@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
 import { checkOriginality, rewriteFlaggedPassages, ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import { factCheckArticle, FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
+import { stripDashes } from "@/lib/textClean";
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
   const supabase = createClient();
@@ -45,6 +46,43 @@ export async function deleteAffiliateLink(id: string) {
   revalidatePath("/dashboard/affiliate-links");
 }
 
+// Manual edit, used by EditArticleControl on the article detail page so an editor
+// can fix the body, H1, or meta fields before choosing to publish. Sanitizes em
+// dashes and stray dash-hyphens on every save, same as generation and rewrite, so
+// hand-edited text can't reintroduce what the generation prompt bans.
+export async function updateArticleContent(
+  articleId: string,
+  input: { h1: string; metaTitle: string; metaDescription: string; contentMd: string }
+) {
+  const h1 = stripDashes(input.h1.trim());
+  const metaTitle = stripDashes(input.metaTitle.trim());
+  const metaDescription = stripDashes(input.metaDescription.trim());
+  const contentMd = stripDashes(input.contentMd);
+
+  if (!h1 || !metaTitle || !metaDescription || !contentMd.trim()) {
+    throw new Error("H1, meta title, meta description, and article body cannot be empty.");
+  }
+
+  const supabase = createClient();
+
+  const { data: article, error: fetchError } = await supabase
+    .from("articles")
+    .select("slug")
+    .eq("id", articleId)
+    .single();
+  if (fetchError) throw new Error(fetchError.message);
+  if (!article) throw new Error("Article not found");
+
+  const { error } = await supabase
+    .from("articles")
+    .update({ h1, meta_title: metaTitle, meta_description: metaDescription, content_md: contentMd })
+    .eq("id", articleId);
+
+  if (error) throw new Error(error.message);
+
+  revalidatePath(`/dashboard/articles/${article.slug}`);
+}
+
 // Publish gates: an article cannot move to "published" while EITHER its
 // originality_score or its fact-check accuracy_score is below its pass
 // threshold (or otherwise flagged needs_review), unless the caller explicitly
@@ -52,6 +90,13 @@ export async function deleteAffiliateLink(id: string) {
 // /api/generate. Originality is narrowed to flag only verbatim/near-verbatim
 // copied wording (true plagiarism), not paraphrase or structure, so this gate
 // only blocks on actual copied text. Fact-check blocks on misinformation.
+//
+// When the move to "published" actually goes through (gates passed, or
+// force === true), this also re-sanitizes h1/meta/content_md as a last
+// defensive pass for em dashes and stray dash-hyphens. The [n] keyword
+// reference markers are a display-only overlay (applied by highlightKeywords
+// at render time, never stored in content_md), so they're hidden for
+// published articles directly in the page render rather than here.
 export async function updateArticleStatus(articleId: string, status: string, force = false) {
   const supabase = createClient();
 
@@ -97,8 +142,30 @@ export async function updateArticleStatus(articleId: string, status: string, for
     }
   }
 
-  const { error } = await supabase.from("articles").update({ status }).eq("id", articleId);
-  if (error) throw new Error(error.message);
+  if (status === "published") {
+    const { data: current, error: contentFetchError } = await supabase
+      .from("articles")
+      .select("h1, meta_title, meta_description, content_md")
+      .eq("id", articleId)
+      .single();
+    if (contentFetchError) throw new Error(contentFetchError.message);
+
+    const { error } = await supabase
+      .from("articles")
+      .update({
+        status,
+        h1: stripDashes(current?.h1 ?? ""),
+        meta_title: stripDashes(current?.meta_title ?? ""),
+        meta_description: stripDashes(current?.meta_description ?? ""),
+        content_md: stripDashes(current?.content_md ?? ""),
+      })
+      .eq("id", articleId);
+    if (error) throw new Error(error.message);
+  } else {
+    const { error } = await supabase.from("articles").update({ status }).eq("id", articleId);
+    if (error) throw new Error(error.message);
+  }
+
   revalidatePath("/dashboard/articles");
 }
 
@@ -142,8 +209,9 @@ export async function recheckArticleChecks(articleId: string) {
 // Auto-rewrite: takes the article's CURRENT originality_check.issues (whatever the last
 // check found) and asks the model to rewrite just those flagged passages — same facts,
 // original phrasing/examples/framing — leaving the rest of the article untouched. Saves
-// the new content_md, then re-runs both checks against it so the panel reflects the
-// rewrite immediately, in the same row (no new article created).
+// the new content_md (sanitized for em dashes/stray hyphens, same as generation), then
+// re-runs both checks against it so the panel reflects the rewrite immediately, in the
+// same row (no new article created).
 export async function rewriteFlaggedOriginality(articleId: string) {
   const supabase = createClient();
 
@@ -172,15 +240,17 @@ export async function rewriteFlaggedOriginality(articleId: string) {
     throw new Error(rewrite.error ?? "Rewrite did not produce any changes.");
   }
 
+  const cleanedContent = stripDashes(rewrite.content_md);
+
   const [originalityCheck, factCheck] = await Promise.all([
-    checkOriginality(rewrite.content_md, sources),
-    factCheckArticle(rewrite.content_md, faqs, sources),
+    checkOriginality(cleanedContent, sources),
+    factCheckArticle(cleanedContent, faqs, sources),
   ]);
 
   const { error: updateError } = await supabase
     .from("articles")
     .update({
-      content_md: rewrite.content_md,
+      content_md: cleanedContent,
       originality_check: originalityCheck,
       fact_check: factCheck,
     })
