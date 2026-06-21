@@ -48,6 +48,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [primaryKeyword, setPrimaryKeyword] = useState("");
   const [supporting, setSupporting] = useState("");
   const [suggestionMessage, setSuggestionMessage] = useState<string | null>(null);
+  const [suggestingTopic, setSuggestingTopic] = useState(false);
+  const [topicRationale, setTopicRationale] = useState<string | null>(null);
+  const [topicError, setTopicError] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [sourcesText, setSourcesText] = useState("");
   const [fetchedSources, setFetchedSources] = useState<FetchedSource[]>([]);
@@ -58,23 +61,39 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [duplicateMatches, setDuplicateMatches] = useState<{ title: string; slug: string; score: number }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Suggest a topic and the bank pills draw from every keyword in the
-  // cluster, used or not — a cluster that's fully used should still be able
-  // to suggest a topic (duplicate-content protection happens later, at
-  // submit time, via title similarity matching against existing posts).
+  // The bank pills still draw from every keyword in the cluster, used or
+  // not, so a cluster that's fully used still shows its history.
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
   // Only genuinely unused keywords are eligible to be auto-imported as
   // supporting keywords — that feature exists specifically to recycle
   // research that hasn't made it into an article yet.
   const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
 
-  function suggestTopic() {
-    if (clusterKeywords.length === 0) return;
-    // Avoid re-suggesting the keyword that's already in the box, if there's another option.
-    const pool = clusterKeywords.filter((k) => k.keyword !== primaryKeyword);
-    const choices = pool.length > 0 ? pool : clusterKeywords;
-    const pick = choices[Math.floor(Math.random() * choices.length)];
-    setPrimaryKeyword(pick.keyword);
+  // Asks Claude for a genuinely new topic for this cluster, checked against
+  // every keyword and title already covered, instead of just recycling
+  // whatever happens to already be sitting in the keyword bank.
+  async function suggestTopic() {
+    setTopicError(null);
+    setTopicRationale(null);
+    setSuggestingTopic(true);
+    try {
+      const res = await fetch("/api/suggest-topic", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clusterId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTopicError(data.error ?? "Could not suggest a topic");
+        return;
+      }
+      setPrimaryKeyword(data.topic);
+      setTopicRationale(data.rationale ?? null);
+    } catch {
+      setTopicError("Could not suggest a topic");
+    } finally {
+      setSuggestingTopic(false);
+    }
   }
 
   // Pulls unused keywords from this cluster's bank into the Supporting field,
@@ -228,20 +247,27 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             <button
               type="button"
               onClick={suggestTopic}
-              disabled={clusterKeywords.length === 0}
+              disabled={suggestingTopic || !clusterId}
+              title="Ask Claude for a fresh topic for this cluster, checked against everything already covered"
               className="ml-3 shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50"
             >
-              Suggest a topic
+              {suggestingTopic ? "Thinking…" : "Suggest a topic"}
             </button>
           </div>
           <input
             value={primaryKeyword}
-            onChange={(e) => setPrimaryKeyword(e.target.value)}
+            onChange={(e) => {
+              setPrimaryKeyword(e.target.value);
+              setTopicRationale(null);
+            }}
             placeholder="e.g. best invoicing software for freelancers 2026"
             className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm"
           />
+          {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
+          {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
           <p className="mt-1 text-xs text-atlasnavy/40">
-            Pick a topic from the bank above, hit "Suggest a topic" for a random one, or just type your own.
+            Pick a topic from the bank above, hit "Suggest a topic" for a fresh AI-generated angle, or
+            just type your own.
           </p>
         </div>
 
