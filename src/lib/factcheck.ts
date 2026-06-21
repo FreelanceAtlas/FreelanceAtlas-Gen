@@ -1,7 +1,9 @@
 // Post-generation fact-check pass: re-reads the drafted article alongside the
 // sources it was supposed to be grounded in, and flags any claim that isn't
-// plausibly backed by them. This never blocks saving — it produces a review
-// panel so an editor can see exactly what (if anything) needs a second look.
+// plausibly backed by them, or that is actively wrong. This is the real
+// publish gate (see FACT_CHECK_PASS_THRESHOLD + updateArticleStatus in
+// src/app/dashboard/actions.ts) — misinformation reaching readers is the
+// failure mode worth blocking on, more so than phrasing/originality concerns.
 
 export interface FactCheckIssue {
   claim: string;
@@ -15,6 +17,8 @@ export interface FactCheckResult {
   issues: FactCheckIssue[];
 }
 
+export const FACT_CHECK_PASS_THRESHOLD = 90; // gate: publishing is blocked below this score
+
 const FACTCHECK_TOOL = {
   name: "submit_fact_check",
   description: "Submit the fact-check results for the article.",
@@ -24,11 +28,14 @@ const FACTCHECK_TOOL = {
       accuracy_score: {
         type: "number",
         description:
-          "0-100 overall confidence that the article's factual claims are grounded in the supplied sources. 100 = no ungrounded claims.",
+          "0-100 overall confidence that the article's factual claims are grounded in, and consistent " +
+          "with, the supplied sources. 100 = no ungrounded or incorrect claims. Deduct heavily for any " +
+          "claim that actively contradicts a source or states something false, not just claims that " +
+          "merely lack a citation.",
       },
       needs_review: {
         type: "boolean",
-        description: 'true if accuracy_score < 90 OR any issue has severity "high".',
+        description: `true if accuracy_score < ${FACT_CHECK_PASS_THRESHOLD} OR any issue has severity "high".`,
       },
       issues: {
         type: "array",
@@ -62,8 +69,8 @@ export async function factCheckArticle(
 ): Promise<FactCheckResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    // Fact-checking is a non-blocking enhancement — fail soft rather than
-    // breaking generation if the key is somehow missing at this call site.
+    // Fact-checking is the publish gate — fail soft-but-closed: missing config
+    // returns a deliberately blocking result rather than silently passing.
     return failSoft(
       "(fact-check not run)",
       "ANTHROPIC_API_KEY is not configured, so the fact-check pass could not run."
@@ -74,20 +81,29 @@ export async function factCheckArticle(
     ? sources.map((s) => `- ${s.title} (${s.publishedDate ?? "date unknown"}): ${s.url}`).join("\n")
     : "No sources were supplied for this article at all.";
 
-  const systemPrompt = `You are a fact-checking editor for FreelanceAtlas. You will be given a drafted
-article body plus its FAQ answers, and the list of sources the writer was supposed to ground factual
-claims in. Check every concrete factual claim, statistic, dollar figure, percentage, or "according to X"
-attribution in the article against that source list.
+  const systemPrompt = `You are a fact-checking editor for FreelanceAtlas, and the most important thing
+you do is catch misinformation before it reaches readers — that matters far more than style or
+phrasing. You will be given a drafted article body plus its FAQ answers, and the list of sources the
+writer was supposed to ground factual claims in. Check every concrete factual claim, statistic, dollar
+figure, percentage, date, or "according to X" attribution in the article against that source list and
+against your own general knowledge.
 
-Flag a claim if:
-- It states a specific number, statistic, or dollar figure that is not plausibly supported by any
-  listed source (or by no source at all, when none were supplied).
-- It attributes a claim to a named source/platform that doesn't appear to cover that claim.
-- It states something as a hard fact that is really an opinion, estimate, or rule of thumb without
-  saying so.
+Flag a claim, in roughly this priority order:
+- HIGH: it is actively wrong, or contradicts a listed source, rather than merely lacking one (e.g. a
+  stat that's the opposite sign, a platform fee or rate that's out of date or incorrect, a year/date
+  that doesn't match the source's own publish date, a tool/feature attributed to the wrong product).
+- HIGH: it cites a named source for a specific number or claim that source does not actually contain
+  (a fabricated/invented attribution), as opposed to a claim that's just uncited.
+- MEDIUM: it states a number, statistic, or dollar figure that is plausible but not supported by any
+  listed source (or by no source at all, when none were supplied) and could be stale or outdated.
+- MEDIUM: two passages in the article state numbers for the same thing that don't agree with each
+  other (internal inconsistency).
+- LOW: it states something as a hard, certain fact that is really an opinion, estimate, or rule of
+  thumb, without signaling that.
 
 Do NOT flag general advice, frameworks, opinions, or recommendations that aren't presented as a cited
-external fact — that is normal blog content, not a factual claim to verify.
+external fact — that is normal blog content, not a factual claim to verify. Do NOT flag wording or
+phrasing similarity to a source — that's a separate originality concern, not your job here.
 
 If you find no issues, return an empty "issues" array and a high accuracy_score.
 
@@ -150,7 +166,7 @@ Fact-check this article against the supplied sources now by calling submit_fact_
   const needs_review =
     typeof parsed.needs_review === "boolean"
       ? parsed.needs_review
-      : accuracy_score < 90 || issues.some((i) => i.severity === "high");
+      : accuracy_score < FACT_CHECK_PASS_THRESHOLD || issues.some((i) => i.severity === "high");
 
   return { accuracy_score, needs_review, issues };
 }
