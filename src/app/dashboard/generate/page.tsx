@@ -5,7 +5,7 @@ export default async function GeneratePage() {
   const supabase = createClient();
   const [{ data: clusters }, { data: keywords }] = await Promise.all([
     supabase.from("clusters").select("id, name").order("name"),
-    supabase.from("keywords").select("id, keyword, cluster_id").eq("is_used", false),
+    supabase.from("keywords").select("id, keyword, cluster_id, is_used"),
   ]);
 
   return (
