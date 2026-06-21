@@ -90,8 +90,11 @@ export default async function ArticleDetail({ params }: { params: { slug: string
           </div>
           <p className="mt-1 text-sm text-atlasnavy/70">
             {originalityCheck.needs_review
-              ? `Below the ${ORIGINALITY_PASS_THRESHOLD}/100 advisory threshold. This no longer blocks publishing on its own — use "Auto-rewrite flagged passages" or rewrite manually if you want a higher score, but the article can be published as-is.`
-              : "Reads as an independent synthesis — no passage traced back to a single source's wording or structure."}
+              ? `Below the ${ORIGINALITY_PASS_THRESHOLD}/100 publish threshold — this gate blocks on verbatim or ` +
+                `near-verbatim copied wording from a source (true plagiarism), not paraphrase or structure. ` +
+                `Publishing is blocked until the flagged passages are rewritten and rechecked, or an editor ` +
+                `explicitly overrides it.`
+              : "No verbatim or near-verbatim text traced back to a single source's wording."}
           </p>
 
           {originalityCheck.issues.length > 0 && (
@@ -142,7 +145,9 @@ export default async function ArticleDetail({ params }: { params: { slug: string
           </div>
           <p className="mt-1 text-sm text-atlasnavy/70">
             {factCheck.needs_review
-              ? `Below the ${FACT_CHECK_PASS_THRESHOLD}/100 publish threshold — this is the actual gate. Publishing is blocked until the flagged claims are fixed and the article is rechecked, or an editor explicitly overrides it.`
+              ? `Below the ${FACT_CHECK_PASS_THRESHOLD}/100 publish threshold — this gate blocks on misinformation. ` +
+                `Publishing is blocked until the flagged claims are fixed and the article is rechecked, or an ` +
+                `editor explicitly overrides it.`
               : "No unsupported or incorrect claims found against the supplied sources."}
           </p>
 
