@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { generateArticle } from "@/lib/generate";
 import { factCheckArticle } from "@/lib/factcheck";
+import { checkOriginality } from "@/lib/originality";
 import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from "@/lib/seo";
 
 export async function POST(request: Request) {
@@ -110,6 +111,12 @@ export async function POST(request: Request) {
   // an accuracy score and a list of claims that need editor review.
   const factCheck = await factCheckArticle(generated.content_md, generated.faqs, sources);
 
+  // --- Originality check against the sources it was researched from -------------
+  // Also non-blocking at save time (the draft is always saved so the generation
+  // isn't wasted), but the resulting score gates the *publish* transition — see
+  // updateArticleStatus in src/app/dashboard/actions.ts.
+  const originalityCheck = await checkOriginality(generated.content_md, sources);
+
   const { data: article, error } = await supabase
     .from("articles")
     .insert({
@@ -125,6 +132,7 @@ export async function POST(request: Request) {
       sources,
       affiliate_links_used: affiliateLinksUsed,
       fact_check: factCheck,
+      originality_check: originalityCheck,
       status: "draft",
     })
     .select()
