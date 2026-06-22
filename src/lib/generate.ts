@@ -88,9 +88,27 @@ SEO requirements (follow the pillar-cluster keyword model and on-page best pract
   questions to address" is supplied in the user message, your FAQ entries should cover those
   specific questions (rephrased naturally if needed) rather than generic substitutes — every
   supplied question should map to at least one FAQ entry.
-- Cite the supplied sources inline where relevant (e.g. "according to [Source Name]") and only use
-  facts that are recent and attributable to those sources.
 - Output must be publish-ready: no placeholders, no "[insert here]", no lorem ipsum.
+
+SOURCE VERIFICATION (mandatory — read this before citing anything):
+- You have only been given each supplied source's title, publish date, and URL, not its actual
+  text. You do NOT know what any source actually says until you fetch it.
+- Before stating any specific number, percentage, dollar amount, date, legal threshold, statistic,
+  ranking, or named finding as coming from one of the supplied sources (e.g. "according to
+  [Source]..."), you must first call the web_fetch tool on that source's URL and confirm the figure
+  is genuinely stated there. Never attribute a specific figure to a source you have not fetched.
+- You do not need to fetch every source. Ordinary, widely-known freelancing advice (e.g. "send
+  invoices promptly," "specialists tend to charge more than generalists") doesn't need a citation or
+  a fetch — just write it in your own words as general guidance, with no source name attached.
+  Only fetch when you actually intend to cite something specific and checkable.
+- If a fetch fails, times out, or the source's real content does not actually contain the figure you
+  wanted, drop that specific claim and the attribution entirely. Do not guess, round, or keep a
+  plausible-sounding number anyway. Rewrite the point in general terms instead (e.g. "thresholds for
+  required written freelance contracts vary by state, often in the low hundreds of dollars" rather
+  than inventing one exact dollar figure and a source for it).
+- Never name a report, study, or publication as the source of a specific ranking, statistic, or list
+  unless you fetched that exact page and that exact figure is visible in it. A source's title alone
+  is never enough to justify a specific claim.
 
 ORIGINALITY (mandatory — this is checked after drafting, so treat it as a hard requirement, not a
 style preference):
@@ -119,17 +137,21 @@ style preference):
   the same point instead of slotting new words into a source's rhetorical mold.
 - Treat common, widely-known advice as general knowledge and explain it in your own words rather than
   treating it as something that must be attributed.
-- Only attribute a claim to a source ("according to [Source]") when that exact claim is genuinely
-  supported by that source — never as a generic citation dropped near unrelated content.
-- Never invent studies, statistics, performance claims, or "expert consensus" that isn't in the
-  supplied sources.
+- Only attribute a claim to a source ("according to [Source]") when you have fetched that source and
+  that exact claim is genuinely supported by its actual content, per SOURCE VERIFICATION above —
+  never as a generic citation dropped near unrelated content, and never based on the source's title
+  alone.
+- Never invent studies, statistics, performance claims, or "expert consensus" that isn't something
+  you actually fetched and confirmed in the supplied sources.
 - Before finalizing, mentally re-read your draft and rewrite any sentence, example, or rhetorical
   device that still resembles, even loosely, even reworded, something from one specific source.
 - The finished article should read like an independently written expert guide — not a rewritten
   compilation of the source material. A different editor handed the same source list in a different
   order should still arrive at a differently structured article with different examples.
 
-Call the submit_article tool exactly once with the completed post. Do not respond with plain text.`;
+Call the submit_article tool exactly once, as your final step, with the completed post. You may call
+web_fetch as many times as you need first to verify specific facts, but you must finish by calling
+submit_article. Do not respond with plain text instead of calling submit_article.`;
 
 const ARTICLE_TOOL = {
   name: "submit_article",
@@ -235,14 +257,16 @@ Primary keyword: ${input.primaryKeyword}
 Supporting keywords: ${input.supportingKeywords.join(", ") || "none"}
 Editor notes: ${input.notes || "none"}
 
-Recent, credible sources to ground this article in (cite these, prefer the most recent, but build
-your own outline independently of them per the ORIGINALITY rules):
+Sources available below — remember, you only have each one's title/date/URL, not its content. Use
+web_fetch on a URL before citing anything specific from it, per SOURCE VERIFICATION (build your own
+outline independently of them per the ORIGINALITY rules either way):
 ${sourceBlock}
 
 Real reader questions to address in the FAQ section (cover every one of these, rephrased naturally if needed):
 ${faqBlock}
 
-Write the full FreelanceAtlas blog post now by calling submit_article.`;
+Research and verify whatever specific facts you intend to cite, then write the full FreelanceAtlas
+blog post by calling submit_article as your final step.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -253,11 +277,13 @@ Write the full FreelanceAtlas blog post now by calling submit_article.`;
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      // A full article body + 4-6 FAQs + keyword usage table reliably exceeds 4096 tokens.
-      max_tokens: 8192,
+      // Fetched source pages now count against this turn's token budget alongside the
+      // article itself, so this needs more headroom than a plain single-shot generation.
+      max_tokens: 16000,
       system: SYSTEM_PROMPT,
-      tools: [ARTICLE_TOOL],
-      tool_choice: { type: "tool", name: "submit_article" },
+      tools: [{ type: "web_fetch_20250910", name: "web_fetch", max_uses: 8 }, ARTICLE_TOOL],
+      // Must be "auto" (not forced to submit_article) so the model can call web_fetch
+      // first to verify facts, then call submit_article once it's actually ready.
       messages: [{ role: "user", content: userPrompt }],
     }),
   });
@@ -271,14 +297,16 @@ Write the full FreelanceAtlas blog post now by calling submit_article.`;
 
   if (data.stop_reason === "max_tokens") {
     throw new Error(
-      "Generation was cut off because the article exceeded the model's output limit. Try a narrower topic, or shorten the supporting keyword list, and generate again."
+      "Generation was cut off because the article (plus source verification) exceeded the model's output limit. Try a narrower topic, fewer supporting keywords, or fewer sources, and generate again."
     );
   }
 
-  const toolUse = (data.content ?? []).find((block: any) => block.type === "tool_use");
+  const toolUse = (data.content ?? []).find(
+    (block: any) => block.type === "tool_use" && block.name === "submit_article"
+  );
   if (!toolUse) {
     throw new Error(
-      "The model did not return a structured article (no tool call found). Try generating again."
+      "The model did not return a structured article (no submit_article tool call found). Try generating again."
     );
   }
 
