@@ -5,6 +5,12 @@ import { factCheckArticle } from "@/lib/factcheck";
 import { checkOriginality } from "@/lib/originality";
 import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from "@/lib/seo";
 
+// generateArticle() now runs an internal self-correction gate (fact-check, optional
+// one-shot revision, optional re-check) before returning, on top of this route's own
+// fact-check + originality calls. That's up to ~6 sequential LLM round-trips per
+// request, so the platform default timeout no longer has enough margin.
+export const maxDuration = 300;
+
 export async function POST(request: Request) {
   const supabase = createClient();
 
@@ -66,6 +72,9 @@ export async function POST(request: Request) {
   // below as ground truth, so the fact-check gate can reject a cited number that the
   // writer didn't actually verify, instead of just judging plausibility from its own
   // training knowledge — a prompt-only fix on the writer side alone wasn't enough.
+  // generateArticle also now runs this same fact-check internally (the self-correction
+  // gate) and attempts one bounded fix before returning, so by the time we get here the
+  // draft has already had a chance to be auto-corrected, not just flagged.
   const { article: generated, fetchedSources } = await generateArticle({
     clusterName: cluster.name,
     primaryKeyword,
@@ -116,7 +125,9 @@ export async function POST(request: Request) {
   // an accuracy score and a list of claims that need editor review. fetchedSources
   // (the real page text fetched during generation) is passed through so this check
   // can verify cited numbers against what was actually fetched, not just judge
-  // plausibility — see src/lib/factcheck.ts.
+  // plausibility — see src/lib/factcheck.ts. This re-check runs again post-affiliate-
+  // link insertion and is the authoritative, stored result (independent of, and run
+  // after, generateArticle's own internal self-correction pass).
   const factCheck = await factCheckArticle(generated.content_md, generated.faqs, sources, fetchedSources);
 
   // --- Originality check against the sources it was researched from -------------
