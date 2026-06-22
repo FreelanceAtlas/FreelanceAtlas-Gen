@@ -61,7 +61,12 @@ export async function POST(request: Request) {
     .select("*")
     .eq("cluster_id", clusterId);
 
-  const generated = await generateArticle({
+  // fetchedSources carries the actual page text Claude fetched via web_fetch while
+  // writing the draft (see src/lib/generate.ts). It's threaded into factCheckArticle
+  // below as ground truth, so the fact-check gate can reject a cited number that the
+  // writer didn't actually verify, instead of just judging plausibility from its own
+  // training knowledge — a prompt-only fix on the writer side alone wasn't enough.
+  const { article: generated, fetchedSources } = await generateArticle({
     clusterName: cluster.name,
     primaryKeyword,
     supportingKeywords,
@@ -108,8 +113,11 @@ export async function POST(request: Request) {
 
   // --- Fact-check the draft against the sources it was grounded in --------------
   // Non-blocking: always saves the article either way, the result just surfaces
-  // an accuracy score and a list of claims that need editor review.
-  const factCheck = await factCheckArticle(generated.content_md, generated.faqs, sources);
+  // an accuracy score and a list of claims that need editor review. fetchedSources
+  // (the real page text fetched during generation) is passed through so this check
+  // can verify cited numbers against what was actually fetched, not just judge
+  // plausibility — see src/lib/factcheck.ts.
+  const factCheck = await factCheckArticle(generated.content_md, generated.faqs, sources, fetchedSources);
 
   // --- Originality check against the sources it was researched from -------------
   // Also non-blocking at save time (the draft is always saved so the generation

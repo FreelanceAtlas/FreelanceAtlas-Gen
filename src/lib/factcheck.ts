@@ -4,6 +4,16 @@
 // publish gate (see FACT_CHECK_PASS_THRESHOLD + updateArticleStatus in
 // src/app/dashboard/actions.ts) — misinformation reaching readers is the
 // failure mode worth blocking on, more so than phrasing/originality concerns.
+//
+// IMPORTANT: a prompt-only fix asking the writer to fetch-before-citing did not
+// stop fabrication — the writer kept pattern-completing plausible-looking numbers
+// and attaching them to real source names even with web_fetch calls in the
+// transcript. So this check no longer just judges plausibility from its own
+// training knowledge: when the caller supplies `fetchedSourceText` (the actual
+// page text Claude fetched during generation, threaded through from
+// src/lib/generate.ts), this check treats that text as ground truth and auto-flags
+// HIGH any specific number attributed to a source that doesn't actually appear in
+// what was fetched, independent of whether the number sounds right.
 
 export interface FactCheckIssue {
   claim: string;
@@ -65,7 +75,8 @@ function failSoft(claim: string, concern: string): FactCheckResult {
 export async function factCheckArticle(
   contentMd: string,
   faqs: { question: string; answer: string }[],
-  sources: { url: string; title: string; publishedDate?: string }[]
+  sources: { url: string; title: string; publishedDate?: string }[],
+  fetchedSourceText?: Record<string, string>
 ): Promise<FactCheckResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -81,25 +92,48 @@ export async function factCheckArticle(
     ? sources.map((s) => `- ${s.title} (${s.publishedDate ?? "date unknown"}): ${s.url}`).join("\n")
     : "No sources were supplied for this article at all.";
 
+  const fetchedEntries = Object.entries(fetchedSourceText ?? {});
+  const hasFetchedText = fetchedEntries.length > 0;
+  const fetchedTextBlock = hasFetchedText
+    ? fetchedEntries
+        .map(([url, text]) => `=== FETCHED TEXT FOR ${url} ===\n${text}`)
+        .join("\n\n")
+    : "(none captured — this run has no actual fetched page text available, e.g. a recheck of an " +
+      "older draft. Fall back to judging plausibility against the source list and general knowledge.)";
+
   const systemPrompt = `You are a fact-checking editor for FreelanceAtlas, and the most important thing
 you do is catch misinformation before it reaches readers — that matters far more than style or
-phrasing. You will be given a drafted article body plus its FAQ answers, and the list of sources the
-writer was supposed to ground factual claims in. Check every concrete factual claim, statistic, dollar
-figure, percentage, date, or "according to X" attribution in the article against that source list and
-against your own general knowledge.
+phrasing. You will be given a drafted article body plus its FAQ answers, the list of sources the
+writer was supposed to ground factual claims in, and (when available) the ACTUAL TEXT Claude fetched
+from those sources while writing. Check every concrete factual claim, statistic, dollar figure,
+percentage, date, or "according to X" attribution in the article against that evidence.
 
 Flag a claim, in roughly this priority order:
+- HIGHEST: when fetched text is supplied below for the relevant source, treat it as ground truth, not
+  your own training knowledge. If the article states a specific number, percentage, dollar figure,
+  date, day count, or ranking tied to a named company, platform, tool, law, or report, and the
+  fetched text for that source does NOT actually contain that figure (or contains a different one),
+  flag it HIGH as "fabricated or unverifiable — not found in the fetched source text," even if the
+  number sounds plausible or matches what you'd otherwise expect from general knowledge. A number
+  that happens to be correct is still a violation if the writer didn't actually get it from the
+  fetched page — the whole point of this check is to catch confident-sounding numbers that were
+  pattern-completed rather than verified, and "it happens to be right" does not excuse that. This
+  applies whether or not the article names the source out loud next to the number.
 - HIGH: it is actively wrong, or contradicts a listed source, rather than merely lacking one (e.g. a
   stat that's the opposite sign, a platform fee or rate that's out of date or incorrect, a year/date
   that doesn't match the source's own publish date, a tool/feature attributed to the wrong product).
 - HIGH: it cites a named source for a specific number or claim that source does not actually contain
   (a fabricated/invented attribution), as opposed to a claim that's just uncited.
-- MEDIUM: it states a number, statistic, or dollar figure that is plausible but not supported by any
-  listed source (or by no source at all, when none were supplied) and could be stale or outdated.
+- MEDIUM: no fetched text was supplied for the relevant source (see "none captured" note below), and
+  the claim states a number, statistic, or dollar figure that is plausible but unverifiable against
+  any listed source, and could be stale or outdated.
 - MEDIUM: two passages in the article state numbers for the same thing that don't agree with each
   other (internal inconsistency).
 - LOW: it states something as a hard, certain fact that is really an opinion, estimate, or rule of
   thumb, without signaling that.
+
+When no fetched text is supplied at all (see the placeholder note in FETCHED SOURCE TEXT below), fall
+back to judging plausibility against the source list and your own general knowledge, same as before.
 
 Do NOT flag general advice, frameworks, opinions, or recommendations that aren't presented as a cited
 external fact — that is normal blog content, not a factual claim to verify. Do NOT flag wording or
@@ -112,13 +146,17 @@ Call the submit_fact_check tool exactly once with your results. Do not respond w
   const userPrompt = `SOURCES SUPPLIED TO THE WRITER:
 ${sourceBlock}
 
+ACTUAL FETCHED SOURCE TEXT (ground truth captured during writing, when available):
+${fetchedTextBlock}
+
 ARTICLE BODY:
 ${contentMd}
 
 FAQS:
 ${faqs.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n")}
 
-Fact-check this article against the supplied sources now by calling submit_fact_check.`;
+Fact-check this article against the supplied sources and the actual fetched text now by calling
+submit_fact_check.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",

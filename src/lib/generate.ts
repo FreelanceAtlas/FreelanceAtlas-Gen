@@ -30,6 +30,16 @@ export interface GeneratedArticle {
   keyword_usage: KeywordUsage[];
 }
 
+// The actual text Claude fetched via web_fetch during generation, keyed by URL. This is
+// the ground truth the fact-check pass uses to verify (rather than trust) every specific
+// number the writer attributes to a source — see src/lib/factcheck.ts. Non-text fetch
+// results (e.g. PDFs, whose bytes arrive base64-encoded) are recorded with a placeholder
+// string rather than decoded, since the fact-checker can't text-match against raw bytes.
+export interface GeneratedArticleResult {
+  article: GeneratedArticle;
+  fetchedSources: Record<string, string>;
+}
+
 const SYSTEM_PROMPT = `You are the senior content writer for FreelanceAtlas (freelanceatlas.com), a blog
 that gives freelancers practical, no-fluff money and business advice. Match the live site's
 voice and post structure exactly — these rules are reverse-engineered from published FreelanceAtlas
@@ -104,6 +114,10 @@ SOURCE VERIFICATION (mandatory, hard constraint — read this before writing a s
   number is genuinely stated there. If you have not done that for a given number in this
   conversation, you are not allowed to write that number anywhere in the article, named source or
   not.
+- A fact-check pass after you submit will re-read the actual fetched page text and reject any
+  number it cannot find stated there, even if that number is plausible or happens to be correct
+  from general knowledge — so guessing or rounding to a "typical" figure will be caught and will
+  block publication, not just look risky.
 - If a fetch fails, times out, returns unrelated content, or the page does not actually contain the
   figure you wanted, you have exactly two options: fetch a different real source for it, or drop the
   number and rewrite the point in qualitative terms (e.g. "charges a percentage-based commission
@@ -249,7 +263,50 @@ function sanitizeGeneratedArticle(article: GeneratedArticle): GeneratedArticle {
   };
 }
 
-export async function generateArticle(input: GenerateInput): Promise<GeneratedArticle> {
+// Per-source cap on how much fetched page text we carry forward into the fact-check
+// prompt. Generous enough to cover the section a number actually came from, small
+// enough that a handful of fetched pages doesn't blow up the fact-check call's input.
+const MAX_FETCHED_TEXT_CHARS = 8000;
+
+// Pulls the actual fetched page text out of the model's response so the fact-check
+// pass (src/lib/factcheck.ts) can verify numbers against real source text instead of
+// trusting the writer's attribution or its own general knowledge. This is the ground
+// truth the prompt-level SOURCE VERIFICATION rule alone couldn't enforce: the writer
+// was still pattern-completing plausible-looking numbers even when told to fetch first,
+// so the fix has to live in an independent check that can see what was actually fetched.
+function extractFetchedSourceText(content: unknown): Record<string, string> {
+  const fetchedSources: Record<string, string> = {};
+  if (!Array.isArray(content)) return fetchedSources;
+
+  for (const block of content as any[]) {
+    if (block?.type !== "web_fetch_tool_result") continue;
+    const fetchResult = block.content;
+    if (!fetchResult || fetchResult.type !== "web_fetch_result") continue;
+
+    const url = typeof fetchResult.url === "string" ? fetchResult.url : undefined;
+    if (!url) continue;
+
+    const doc = fetchResult.content;
+    const source = doc?.type === "document" ? doc.source : undefined;
+
+    if (source?.type === "text" && typeof source.data === "string") {
+      fetchedSources[url] =
+        source.data.length > MAX_FETCHED_TEXT_CHARS
+          ? `${source.data.slice(0, MAX_FETCHED_TEXT_CHARS)}\n...[truncated for length]`
+          : source.data;
+    } else {
+      // PDFs and other binary fetch results arrive base64-encoded — record that the
+      // page was fetched, but the fact-checker can't text-match against raw bytes here.
+      fetchedSources[url] =
+        "[fetched non-text content (e.g. a PDF) — raw bytes not decoded, so this cannot be " +
+        "text-matched against cited numbers]";
+    }
+  }
+
+  return fetchedSources;
+}
+
+export async function generateArticle(input: GenerateInput): Promise<GeneratedArticleResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error(
@@ -298,7 +355,13 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
       // article itself, so this needs more headroom than a plain single-shot generation.
       max_tokens: 20000,
       system: SYSTEM_PROMPT,
-      tools: [{ type: "web_fetch_20250910", name: "web_fetch", max_uses: 10 }, ARTICLE_TOOL],
+      tools: [
+        // citations.enabled lets Claude anchor specific sentences to fetched pages, and
+        // (more importantly for us) guarantees fetch results come back as plain document
+        // text rather than some other shape, which extractFetchedSourceText relies on.
+        { type: "web_fetch_20250910", name: "web_fetch", max_uses: 10, citations: { enabled: true } },
+        ARTICLE_TOOL,
+      ],
       // Must be "auto" (not forced to submit_article) so the model can call web_fetch
       // first to verify facts, then call submit_article once it's actually ready.
       messages: [{ role: "user", content: userPrompt }],
@@ -327,5 +390,8 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
     );
   }
 
-  return sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
+  return {
+    article: sanitizeGeneratedArticle(toolUse.input as GeneratedArticle),
+    fetchedSources: extractFetchedSourceText(data.content),
+  };
 }
