@@ -3,6 +3,7 @@
 // store directly in the `articles` table.
 
 import { stripDashes } from "./textClean";
+import { factCheckArticle, type FactCheckIssue } from "./factcheck";
 
 export interface GenerateInput {
   clusterName: string;
@@ -306,6 +307,102 @@ function extractFetchedSourceText(content: unknown): Record<string, string> {
   return fetchedSources;
 }
 
+// --- Generation-time self-correction gate ----------------------------------------------
+// Relying on the downstream fact-check (src/app/api/generate/route.ts) as the only line of
+// defense meant every fabricated number reached a human editor as a "needs review" draft
+// instead of being caught and fixed automatically. This gate runs the same ground-truth
+// fact-check internally, right after drafting, and — if anything comes back flagged — gives
+// the model exactly one chance to fix the flagged claims directly against the fetched source
+// text (not re-fetch, not re-imagine) before generateArticle ever returns. That's the point:
+// stop the fabrication from reaching the draft at all, rather than only flagging it after.
+// The downstream check still runs independently afterward as the final, authoritative record.
+const SELF_CORRECTION_SEVERITIES = new Set(["high", "medium"]);
+
+function buildIssuesBlock(issues: FactCheckIssue[]): string {
+  return issues
+    .map(
+      (issue, i) =>
+        `${i + 1}. [${issue.severity.toUpperCase()}] Claim: "${issue.claim}"\n   Concern: ${issue.concern}`
+    )
+    .join("\n\n");
+}
+
+async function reviseArticleForFactIssues(
+  apiKey: string,
+  article: GeneratedArticle,
+  fetchedSources: Record<string, string>,
+  issues: FactCheckIssue[]
+): Promise<GeneratedArticle | null> {
+  const fetchedEntries = Object.entries(fetchedSources);
+  const fetchedTextBlock = fetchedEntries.length
+    ? fetchedEntries.map(([url, text]) => `=== FETCHED TEXT FOR ${url} ===\n${text}`).join("\n\n")
+    : "(no fetched source text is available for this draft)";
+
+  const revisionSystemPrompt = `You are fixing a draft FreelanceAtlas article that an independent
+fact-checker flagged for ungrounded or incorrect factual claims. You will be given the full article,
+the actual page text that was fetched from its sources while it was being written, and the specific
+list of flagged claims.
+
+For each flagged claim:
+- If the fetched source text below actually contains the figure or claim (the article may have just
+  stated it slightly wrong, or attributed it to the wrong source), correct the article so it matches
+  the fetched text exactly.
+- If the fetched source text does NOT contain that figure or claim at all, remove the specific number
+  and any named-source attribution tied to it, and rephrase the point in qualitative or range terms
+  instead (e.g. "a percentage-based fee that is typically higher early in a project" rather than a
+  specific invented percentage). Do not replace it with a different invented number, and do not invent
+  a new attribution.
+- Do not introduce any new specific number, statistic, or named-source claim anywhere in the article
+  that isn't already supported by the fetched text below.
+- Leave every other part of the article (structure, voice, unflagged claims, FAQs, keyword usage)
+  unchanged.
+
+Call submit_article exactly once with the complete, corrected article — every field, not just the
+parts you changed.`;
+
+  const userPrompt = `ORIGINAL ARTICLE:
+${JSON.stringify(article, null, 2)}
+
+FLAGGED ISSUES FROM THE FACT-CHECK PASS:
+${buildIssuesBlock(issues)}
+
+ACTUAL FETCHED SOURCE TEXT (ground truth — use this, and only this, to decide what to fix):
+${fetchedTextBlock}
+
+Fix the flagged issues now and call submit_article with the complete corrected article.`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8000,
+      system: revisionSystemPrompt,
+      tools: [ARTICLE_TOOL],
+      tool_choice: { type: "tool", name: "submit_article" },
+      messages: [{ role: "user", content: userPrompt }],
+    }),
+  });
+
+  // Best-effort layer: any failure here just means the original draft falls through to
+  // the downstream gate unchanged, not that generation itself fails.
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  if (data.stop_reason === "max_tokens") return null;
+
+  const toolUse = (data.content ?? []).find(
+    (block: any) => block.type === "tool_use" && block.name === "submit_article"
+  );
+  if (!toolUse) return null;
+
+  return sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
+}
+
 export async function generateArticle(input: GenerateInput): Promise<GeneratedArticleResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -390,8 +487,25 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
     );
   }
 
-  return {
-    article: sanitizeGeneratedArticle(toolUse.input as GeneratedArticle),
-    fetchedSources: extractFetchedSourceText(data.content),
-  };
+  const article = sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
+  const fetchedSources = extractFetchedSourceText(data.content);
+
+  // --- Self-correction gate (see comment above reviseArticleForFactIssues) --------------
+  // Run the ground-truth fact-check now, before returning, instead of only downstream.
+  const initialCheck = await factCheckArticle(article.content_md, article.faqs, input.sources, fetchedSources);
+  const flagged = initialCheck.issues.filter((issue) => SELF_CORRECTION_SEVERITIES.has(issue.severity));
+
+  if (flagged.length > 0) {
+    const revised = await reviseArticleForFactIssues(apiKey, article, fetchedSources, flagged);
+    if (revised) {
+      const revisedCheck = await factCheckArticle(revised.content_md, revised.faqs, input.sources, fetchedSources);
+      // Only keep the revision if it actually didn't make things worse — a botched fix
+      // attempt should never be allowed to silently replace a merely-flawed original.
+      if (revisedCheck.accuracy_score >= initialCheck.accuracy_score) {
+        return { article: revised, fetchedSources };
+      }
+    }
+  }
+
+  return { article, fetchedSources };
 }
