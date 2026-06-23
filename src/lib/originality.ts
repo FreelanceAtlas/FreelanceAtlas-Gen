@@ -21,6 +21,11 @@ export interface OriginalityResult {
 
 export const ORIGINALITY_PASS_THRESHOLD = 80; // gate: publishing is blocked below this score
 
+// Bounds how long a single originality/rewrite call can run, for the same reason as
+// FACT_CHECK_TIMEOUT_MS in src/lib/factcheck.ts — an unbounded fetch here could otherwise
+// silently consume the rest of the route's 300s maxDuration and surface as an opaque 504.
+const ORIGINALITY_TIMEOUT_MS = 60_000;
+
 const ORIGINALITY_TOOL = {
   name: "submit_originality_check",
   description: "Submit the originality-check results for the article.",
@@ -132,22 +137,33 @@ ${contentMd}
 
 Check this article for originality against the supplied sources now by calling submit_originality_check.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8192,
-      system: systemPrompt,
-      tools: [ORIGINALITY_TOOL],
-      tool_choice: { type: "tool", name: "submit_originality_check" },
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system: systemPrompt,
+        tools: [ORIGINALITY_TOOL],
+        tool_choice: { type: "tool", name: "submit_originality_check" },
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+      signal: AbortSignal.timeout(ORIGINALITY_TIMEOUT_MS),
+    });
+  } catch (err: any) {
+    const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+    return failSoft(
+      timedOut
+        ? `Originality check request timed out after ${ORIGINALITY_TIMEOUT_MS / 1000}s.`
+        : `Originality check request failed before completing: ${String(err?.message ?? err)}`
+    );
+  }
 
   if (!res.ok) {
     const text = await res.text();
@@ -256,22 +272,35 @@ ${issueBlock}
 
 Return the full article body with only these passages rewritten, by calling submit_rewritten_article.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8192,
-      system: systemPrompt,
-      tools: [REWRITE_TOOL],
-      tool_choice: { type: "tool", name: "submit_rewritten_article" },
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system: systemPrompt,
+        tools: [REWRITE_TOOL],
+        tool_choice: { type: "tool", name: "submit_rewritten_article" },
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+      signal: AbortSignal.timeout(ORIGINALITY_TIMEOUT_MS),
+    });
+  } catch (err: any) {
+    const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+    return {
+      content_md: contentMd,
+      rewritten: false,
+      error: timedOut
+        ? `Rewrite request timed out after ${ORIGINALITY_TIMEOUT_MS / 1000}s.`
+        : `Rewrite request failed before completing: ${String(err?.message ?? err)}`,
+    };
+  }
 
   if (!res.ok) {
     const text = await res.text();
