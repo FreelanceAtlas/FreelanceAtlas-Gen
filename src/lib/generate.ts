@@ -3,7 +3,7 @@
 // store directly in the `articles` table.
 
 import { stripDashes } from "./textClean";
-import { factCheckArticle, type FactCheckIssue } from "./factcheck";
+import { factCheckArticle, type FactCheckIssue, type FactCheckResult } from "./factcheck";
 
 export interface GenerateInput {
   clusterName: string;
@@ -116,6 +116,14 @@ before describing how any named company, platform, tool, law, or report actually
   unverified, just with a number in one and a process description in the other. Dropping the
   attribution and keeping the specific claim is not a workaround, it is the same violation with the
   citation removed.
+- This applies with extra force to pricing-tier feature lists specifically, since that is the most
+  common place this rule gets violated: when you list what a specific paid plan/tier "includes" or
+  "adds" for a named product, every single feature in that list must be something you can point to
+  verbatim (or near-verbatim) in that exact plan's fetched text, not a feature you'd expect that tier
+  to have based on how similar SaaS products are typically structured. Do not pad out a tier's feature
+  list with plausible-sounding extras (e.g. "bank reconciliation," "e-signatures," "double-entry
+  accounting") just because comparable tools commonly offer them at that price point. If the fetched
+  text for that plan lists five features, list those five (or fewer), not eight.
 - Before writing any such number or descriptive claim, you must call web_fetch on a real source and
   confirm that exact number or that exact described detail is genuinely stated there. If you have
   not done that for a given claim in this conversation, you are not allowed to write that claim
@@ -170,7 +178,10 @@ style preference):
   underlying facts — organize it into whatever structure best serves the reader, not the order the
   sources happen to present things in.
 - Never reuse five or more consecutive words from a source unless it is a necessary legal, technical,
-  or official term (e.g. a statute name, a government form number).
+  or official term (e.g. a statute name, a government form number). This applies to feature/spec
+  lists too: if a source lists plan features as a comma-separated run of noun phrases, do not lift
+  that run verbatim into your own bullet or sentence, paraphrase each feature individually and
+  reorder or regroup them instead of reproducing the source's own list order and wording.
 - Do not do sentence-level synonym swapping on a source sentence — that is still copying.
 - Do not mirror a source paragraph sentence-by-sentence, and do not reproduce a source's checklist,
   examples, categories, or sequence in substantially the same order.
@@ -334,11 +345,29 @@ function extractFetchedSourceText(content: unknown): Record<string, string> {
 // defense meant every fabricated number reached a human editor as a "needs review" draft
 // instead of being caught and fixed automatically. This gate runs the same ground-truth
 // fact-check internally, right after drafting, and — if anything comes back flagged — gives
-// the model exactly one chance to fix the flagged claims directly against the fetched source
-// text (not re-fetch, not re-imagine) before generateArticle ever returns. That's the point:
-// stop the fabrication from reaching the draft at all, rather than only flagging it after.
-// The downstream check still runs independently afterward as the final, authoritative record.
+// the model a bounded number of chances to fix the flagged claims directly against the
+// fetched source text (not re-fetch, not re-imagine) before generateArticle ever returns.
+// That's the point: stop the fabrication from reaching the draft at all, rather than only
+// flagging it after. The downstream check still runs independently afterward as the final,
+// authoritative record.
 const SELF_CORRECTION_SEVERITIES = new Set(["high", "medium"]);
+
+// A single revision pass often doesn't clear every flagged claim in one shot, especially
+// when the initial draft has many issues (e.g. a padded-out pricing-tier feature list with
+// several fabricated entries) — see reviseArticleForFactIssues's own per-claim instructions.
+// Allow one extra attempt at whatever is still flagged after the first pass, rather than
+// accepting "still flagged" as final after a single try.
+const MAX_SELF_CORRECTION_ATTEMPTS = 2;
+
+// Total wall-clock budget for the whole self-correction loop (initial check + every
+// revise/recheck round), independent of GENERATION_TIMEOUT_MS above. Without this, a
+// pathological run where every revise/fact-check call happened to be slow could stack
+// 2 attempts worth of REVISION_TIMEOUT_MS + fact-check time on top of an already-long
+// generation call and blow through the route's 300s maxDuration, reintroducing the exact
+// 504 failure mode this gate's timeouts were meant to prevent. In normal operation these
+// calls are well under their individual ceilings, so this budget is rarely the limiting
+// factor, it just caps the rare worst case.
+const SELF_CORRECTION_BUDGET_MS = 110_000;
 
 // Bounds for the raw Anthropic fetch calls below. Without these, a single hung or very
 // slow request had no ceiling of its own and could consume the rest of the route's 300s
@@ -356,6 +385,31 @@ function buildIssuesBlock(issues: FactCheckIssue[]): string {
         `${i + 1}. [${issue.severity.toUpperCase()}] Claim: "${issue.claim}"\n   Concern: ${issue.concern}`
     )
     .join("\n\n");
+}
+
+// How many HIGH and MEDIUM severity issues a fact-check result contains. Used to compare
+// drafts on what actually matters for publication safety (fabricated/incorrect claims),
+// rather than the raw accuracy_score alone, which is noisier run to run — the fact-check
+// model sometimes lists a confirmed-accurate claim as a "low" severity "issue" (effectively
+// just commentary), which nudges the score without reflecting any real problem.
+function severityCounts(issues: FactCheckIssue[]): { high: number; medium: number } {
+  return {
+    high: issues.filter((i) => i.severity === "high").length,
+    medium: issues.filter((i) => i.severity === "medium").length,
+  };
+}
+
+// True if `next` is a real improvement over `current`: strictly fewer HIGH severity issues,
+// or (tied on HIGH) strictly fewer MEDIUM, or (tied on both) a better accuracy_score as a
+// final tiebreaker. This is intentionally looser than requiring the raw score to improve —
+// see the comment on severityCounts above for why the raw score alone isn't trustworthy
+// enough to gate on, and the comment on the self-correction loop below for what this fixes.
+function isImprovement(current: FactCheckResult, next: FactCheckResult): boolean {
+  const a = severityCounts(current.issues);
+  const b = severityCounts(next.issues);
+  if (b.high !== a.high) return b.high < a.high;
+  if (b.medium !== a.medium) return b.medium < a.medium;
+  return next.accuracy_score > current.accuracy_score;
 }
 
 async function reviseArticleForFactIssues(
@@ -379,7 +433,10 @@ Flagged claims fall into two kinds, and both need the same treatment: numeric/st
 claims about a named company, platform, or tool (e.g. the exact steps in its vetting or application
 process, what engagement types or pricing tiers it offers, what features it has, or how a specific
 named workflow operates). A flagged claim with no number in it is not exempt, it is the same kind of
-problem in different form.
+problem in different form. This includes pricing-tier feature lists specifically: if a plan's feature
+bullet list in the article contains more or different features than what is actually visible in that
+plan's fetched text, trim it down to only the features you can point to verbatim or near-verbatim in
+the fetched text, even if that means a shorter list than the original draft had.
 
 For each flagged claim, first check whether the source it concerns actually appears in the FETCHED
 TEXT block below at all:
@@ -425,8 +482,8 @@ ${fetchedTextBlock}
 Fix the flagged issues now and call submit_article with the complete corrected article.`;
 
   // Best-effort layer: any failure here — including a timeout or network error, not just
-  // a non-OK response — just means the original draft falls through to the downstream
-  // gate unchanged, not that generation itself fails.
+  // a non-OK response — just means the caller's current best draft is kept unchanged, not
+  // that generation itself fails.
   let res: Response;
   try {
     res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -570,26 +627,36 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
   const article = sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
   const fetchedSources = extractFetchedSourceText(data.content);
 
-  // --- Self-correction gate (see comment above reviseArticleForFactIssues) --------------
-  // Run the ground-truth fact-check now, before returning, instead of only downstream.
-  // Wrapped in try/catch so this best-effort layer can never crash the whole generation —
-  // any unexpected failure (timeout, network error, etc.) just falls through to the
-  // original, unmodified draft below, same as a normal "nothing flagged" outcome.
+  // --- Self-correction loop (see comment above reviseArticleForFactIssues) --------------
+  // Run the ground-truth fact-check now, before returning, instead of only downstream, and
+  // give it up to MAX_SELF_CORRECTION_ATTEMPTS chances to clear whatever is still flagged.
+  // Tracks the best draft seen so far via isImprovement (HIGH/MEDIUM issue counts, not raw
+  // score) so a later attempt can never silently regress to something worse than an earlier
+  // one. Wrapped in try/catch so this best-effort layer can never crash the whole
+  // generation — any unexpected failure (timeout, network error, etc.) just falls through
+  // to the best draft found so far (or the original, unmodified draft if nothing improved
+  // on it), same as a normal "nothing flagged" outcome.
   try {
-    const initialCheck = await factCheckArticle(article.content_md, article.faqs, input.sources, fetchedSources);
-    const flagged = initialCheck.issues.filter((issue) => SELF_CORRECTION_SEVERITIES.has(issue.severity));
+    const loopStartedAt = Date.now();
+    let bestArticle = article;
+    let bestCheck = await factCheckArticle(article.content_md, article.faqs, input.sources, fetchedSources);
 
-    if (flagged.length > 0) {
-      const revised = await reviseArticleForFactIssues(apiKey, article, fetchedSources, flagged);
-      if (revised) {
-        const revisedCheck = await factCheckArticle(revised.content_md, revised.faqs, input.sources, fetchedSources);
-        // Only keep the revision if it actually didn't make things worse — a botched fix
-        // attempt should never be allowed to silently replace a merely-flawed original.
-        if (revisedCheck.accuracy_score >= initialCheck.accuracy_score) {
-          return { article: revised, fetchedSources };
-        }
-      }
+    for (let attempt = 0; attempt < MAX_SELF_CORRECTION_ATTEMPTS; attempt++) {
+      const flagged = bestCheck.issues.filter((issue) => SELF_CORRECTION_SEVERITIES.has(issue.severity));
+      if (flagged.length === 0) break;
+      if (Date.now() - loopStartedAt > SELF_CORRECTION_BUDGET_MS) break;
+
+      const revised = await reviseArticleForFactIssues(apiKey, bestArticle, fetchedSources, flagged);
+      if (!revised) break;
+
+      const revisedCheck = await factCheckArticle(revised.content_md, revised.faqs, input.sources, fetchedSources);
+      if (!isImprovement(bestCheck, revisedCheck)) break;
+
+      bestArticle = revised;
+      bestCheck = revisedCheck;
     }
+
+    return { article: bestArticle, fetchedSources };
   } catch {
     // Best-effort layer — fall through to the unmodified draft below.
   }
