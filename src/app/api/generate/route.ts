@@ -120,21 +120,23 @@ export async function POST(request: Request) {
     }))
   );
 
-  // --- Fact-check the draft against the sources it was grounded in --------------
-  // Non-blocking: always saves the article either way, the result just surfaces
-  // an accuracy score and a list of claims that need editor review. fetchedSources
-  // (the real page text fetched during generation) is passed through so this check
-  // can verify cited numbers against what was actually fetched, not just judge
-  // plausibility — see src/lib/factcheck.ts. This re-check runs again post-affiliate-
-  // link insertion and is the authoritative, stored result (independent of, and run
-  // after, generateArticle's own internal self-correction pass).
-  const factCheck = await factCheckArticle(generated.content_md, generated.faqs, sources, fetchedSources);
-
-  // --- Originality check against the sources it was researched from -------------
-  // Also non-blocking at save time (the draft is always saved so the generation
-  // isn't wasted), but the resulting score gates the *publish* transition — see
-  // updateArticleStatus in src/app/dashboard/actions.ts.
-  const originalityCheck = await checkOriginality(generated.content_md, sources);
+  // --- Fact-check + originality check, run in parallel --------------------------
+  // Both are non-blocking at save time (the draft is always saved either way), but
+  // each result gates something downstream: fact_check surfaces an accuracy score and
+  // a list of claims for editor review, and originality_check's score gates the
+  // *publish* transition (see updateArticleStatus in src/app/dashboard/actions.ts).
+  // factCheckArticle is passed fetchedSources (the real page text fetched during
+  // generation) so it can verify cited numbers against what was actually fetched, not
+  // just judge plausibility — see src/lib/factcheck.ts. This re-check runs again
+  // post-affiliate-link insertion and is the authoritative, stored result (independent
+  // of, and run after, generateArticle's own internal self-correction pass).
+  // checkOriginality has no dependency on factCheck's result, so the two run via
+  // Promise.all rather than sequential awaits — that was costing a full extra LLM
+  // round-trip on every request's critical path for no reason.
+  const [factCheck, originalityCheck] = await Promise.all([
+    factCheckArticle(generated.content_md, generated.faqs, sources, fetchedSources),
+    checkOriginality(generated.content_md, sources),
+  ]);
 
   const { data: article, error } = await supabase
     .from("articles")
