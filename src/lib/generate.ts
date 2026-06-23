@@ -134,6 +134,17 @@ before describing how any named company, platform, tool, law, or report actually
   multi-step vetting process before accepting freelancers" instead of naming an exact step count or
   describing steps you have not actually confirmed). Stating your best guess, a "typical" figure or
   process, or a remembered detail from training is not a third option.
+- A failed, empty, or never-attempted fetch for a source is not license to fall back on describing
+  that named entity's specific mechanism in your own generalized words instead. There is a real
+  difference between "I confirmed the broad shape of this from the actual page, just not the exact
+  number" (fine, generalize the number) and "I never got real text from this page at all, so I am
+  describing how I believe this platform's fee/vetting/tier mechanism works from general impression"
+  (not fine, even with no number attached). If you do not have real fetched text for a source at all,
+  do not describe that source's specific mechanism, structure, or process in any form, vague or
+  precise. Instead, either fetch a different real page for it, or write a direct, neutral pointer
+  telling the reader to check that platform's own current page for specifics (e.g. "Upwork's exact
+  fee structure changes periodically, so check Upwork's pricing page directly before you rely on a
+  specific number or tier" ) rather than narrating a mechanism you have not actually confirmed.
 - Never name a report, study, or publication as the source of a specific ranking, statistic,
   process description, or list unless you fetched that exact page and that exact figure or detail
   is visible in it. A source's title alone, or general familiarity with how a well-known platform
@@ -361,20 +372,28 @@ process, what engagement types or pricing tiers it offers, what features it has,
 named workflow operates). A flagged claim with no number in it is not exempt, it is the same kind of
 problem in different form.
 
-For each flagged claim:
-- If the fetched source text below actually contains that figure or that descriptive detail (the
-  article may have just stated it slightly wrong, attributed it to the wrong source, or gotten a
-  step or detail slightly off), correct the article so it matches the fetched text exactly.
-- If the fetched source text does NOT contain that figure or detail at all, remove the specific
-  number, step count, or descriptive detail and any named-source attribution tied to it, and
-  rephrase the point in general, qualitative terms instead. For numeric claims: write something like
-  "a percentage-based fee that is typically higher early in a project" rather than a specific
-  invented percentage. For descriptive claims about a named entity's process or features: write
-  something like "uses a multi-step vetting process before accepting freelancers" rather than naming
-  an exact number or sequence of steps you cannot confirm from the fetched text, or drop the
-  named-entity specifics entirely and make the point in general terms if even a vague version isn't
-  supported. Do not replace it with a different invented number or invented process detail, and do
-  not invent a new attribution.
+For each flagged claim, first check whether the source it concerns actually appears in the FETCHED
+TEXT block below at all:
+- If that source's real fetched text IS present below and it actually contains the figure or
+  descriptive detail (the article may have just stated it slightly wrong, attributed it to the
+  wrong source, or gotten a step or detail slightly off), correct the article so it matches the
+  fetched text exactly.
+- If that source's real fetched text IS present below but does NOT contain that figure or detail at
+  all, remove the specific number, step count, or descriptive detail and any named-source
+  attribution tied to it, and rephrase the point in general, qualitative terms instead. For numeric
+  claims: write something like "a percentage-based fee that is typically higher early in a project"
+  rather than a specific invented percentage. For descriptive claims: write something like "uses a
+  multi-step vetting process before accepting freelancers" rather than naming an exact number or
+  sequence of steps you cannot confirm, or drop the named-entity specifics entirely if even a vague
+  version is not supported.
+- If that source is MISSING from the FETCHED TEXT block entirely (the fetch failed, was never
+  attempted, or returned nothing usable), do not just soften the claim into generalized qualitative
+  language about that entity's mechanism, since that is still an unverified claim about how a
+  specific named platform works, just without a number attached. Instead, replace it with a direct,
+  neutral pointer telling the reader to check that platform's own current page for specifics (e.g.
+  "Upwork's exact fee structure changes periodically, so check Upwork's pricing page directly before
+  you rely on a specific number or tier"), or remove the named-entity specifics entirely and make the
+  surrounding point in general, platform-agnostic terms instead.
 - Do not introduce any new specific number, statistic, process detail, feature claim, or
   named-source claim anywhere in the article that isn't already supported by the fetched text below.
 - Leave every other part of the article (structure, voice, unflagged claims, FAQs, keyword usage)
@@ -389,7 +408,9 @@ ${JSON.stringify(article, null, 2)}
 FLAGGED ISSUES FROM THE FACT-CHECK PASS:
 ${buildIssuesBlock(issues)}
 
-ACTUAL FETCHED SOURCE TEXT (ground truth — use this, and only this, to decide what to fix):
+ACTUAL FETCHED SOURCE TEXT (ground truth — use this, and only this, to decide what to fix; if a
+source you'd expect to see is not listed below at all, treat it as a failed/missing fetch per the
+instructions above):
 ${fetchedTextBlock}
 
 Fix the flagged issues now and call submit_article with the complete corrected article.`;
@@ -452,8 +473,10 @@ Editor notes: ${input.notes || "none"}
 Sources available below — remember, you only have each one's title/date/URL, not its content. Per
 SOURCE VERIFICATION, any specific number tied to a named company, platform, tool, law, or report
 (fee, percentage, dollar amount, day count, ranking, statistic) requires a web_fetch confirming it
-first, named source or not — otherwise drop it or generalize it. Build your own outline independently
-of these sources either way, per the ORIGINALITY rules:
+first, named source or not — otherwise drop it or generalize it. If a fetch for one of these sources
+fails or never succeeds, do not fall back on describing that source's specific mechanism in your own
+generalized words either, point the reader to the platform's own page instead. Build your own outline
+independently of these sources either way, per the ORIGINALITY rules:
 ${sourceBlock}
 
 Real reader questions to address in the FAQ section (cover every one of these, rephrased naturally if needed):
