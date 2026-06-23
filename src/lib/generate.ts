@@ -353,26 +353,44 @@ function extractFetchedSourceText(content: unknown): Record<string, string> {
 // Matches a dollar-amount-shaped figure ($5, $10.99, $1,200, etc.) anywhere in a string.
 const DOLLAR_FIGURE_PATTERN = /\$\s?\d[\d,]*(?:\.\d+)?/g;
 
-// For each fetched source, the exact set of dollar-figure substrings (e.g. "$10.99",
-// "$1,200") that literally appear in its captured text.
+// Matches a storage-size figure (10MB, 250 MB, 1GB, etc.) anywhere in a string. Storage
+// units are the next most common place after dollar amounts where the model attached a
+// confident-sounding, specific number to a named plan/tier with no support in the fetched
+// text — e.g. "10MB per file" for Trello Free and "250MB per file" for Trello Standard were
+// both fabricated in a live retest; neither figure appears anywhere on Trello's actual
+// fetched pricing page.
+const STORAGE_FIGURE_PATTERN = /\d[\d,]*(?:\.\d+)?\s?(?:KB|MB|GB|TB)\b/gi;
+
+// Matches a percentage figure (20%, 12.5%, etc.) anywhere in a string.
+const PERCENT_FIGURE_PATTERN = /\d[\d,]*(?:\.\d+)?\s?%/g;
+
+// For each fetched source, the exact set of figure substrings matching a given pattern
+// (e.g. "$10.99", "250MB", "20%") that literally appear in its captured text. Figures are
+// normalized (whitespace stripped, uppercased) so "250 MB" and "250mb" both collapse to the
+// same key, since exact whitespace/casing varies between a source page and how the model
+// transcribes it, even when the underlying figure itself is genuinely correct.
 //
-// An earlier version of this check (findSourcesWithoutPriceSignal, removed) only asked a
-// binary question: "does this page contain ANY dollar sign at all?" Live retesting on the
-// Asana/Trello/ClickUp pricing topic showed that question is too coarse to catch the real
-// failure: Asana's and Trello's fetched pricing pages are JS-rendered SPAs whose static
-// fetch never returns the real price table, but the captured marketing copy still happened
-// to contain at least one unrelated dollar figure somewhere on the page (a promo blurb, an
-// unrelated callout, etc.). That single stray figure was enough to make the binary check
-// pass, so the "this source has no price data" warning was silently omitted for exactly the
-// two sources that needed it, and the model went on to write fabricated Asana/Trello prices
-// it recalled from training, identically to before the check existed.
+// An earlier version of the dollar-figure check (findSourcesWithoutPriceSignal, removed)
+// only asked a binary question: "does this page contain ANY dollar sign at all?" Live
+// retesting on the Asana/Trello/ClickUp pricing topic showed that question is too coarse to
+// catch the real failure: Asana's and Trello's fetched pricing pages are JS-rendered SPAs
+// whose static fetch never returns the real price table, but the captured marketing copy
+// still happened to contain at least one unrelated dollar figure somewhere on the page (a
+// promo blurb, an unrelated callout, etc.). That single stray figure was enough to make the
+// binary check pass, so the "this source has no price data" warning was silently omitted
+// for exactly the two sources that needed it, and the model went on to write fabricated
+// Asana/Trello prices it recalled from training, identically to before the check existed.
 //
 // Comparing against the exact extracted set instead of a yes/no flag closes that gap: a
 // fabricated $10.99 is still caught as unverified even when the source page has some other
 // real $0 or $49 mentioned elsewhere that has nothing to do with the claim being made.
+function extractFigures(text: string, pattern: RegExp): Set<string> {
+  const matches = text.match(pattern) ?? [];
+  return new Set(matches.map((m) => m.replace(/\s+/g, "").toUpperCase()));
+}
+
 function extractDollarFigures(text: string): Set<string> {
-  const matches = text.match(DOLLAR_FIGURE_PATTERN) ?? [];
-  return new Set(matches.map((m) => m.replace(/\s+/g, "")));
+  return extractFigures(text, DOLLAR_FIGURE_PATTERN);
 }
 
 function buildPriceWhitelistWarning(fetchedSources: Record<string, string>): string {
@@ -407,53 +425,104 @@ listed figures that are genuinely confirmed (use those normally) while every oth
 is still unconfirmed and must be removed or generalized.`;
 }
 
-// --- Deterministic post-processing backstop (Round 4) -----------------------------------
+// --- Deterministic post-processing backstop (Round 4, extended in Round 5) --------------
 // Rounds 1 through 3 all tried to fix the fabricated-price problem by making the prompt more
 // convincing: a severity-aware self-correction loop, then a binary "this source has no $
-// signal at all" warning, then this exact per-figure whitelist warning above (passed into
-// reviseArticleForFactIssues's revision prompt). Three independent live retests on the same
-// Asana/Trello/ClickUp pricing topic all converged on the identical result: the model wrote
-// the exact same fabricated Asana/Trello prices and invented add-on names every time (e.g.
-// Asana Starter "$10.99/$13.49", a fictitious "Timesheets and Budgets add-on" at
-// "$5.99/user/month"), even when handed this function's own computed whitelist stating in
-// plain terms that those exact figures don't appear in the fetched source text. That
-// consistency across runs is strong evidence the model is reproducing a specific remembered
-// number with enough confidence that no prompt-level instruction reliably overrides it.
+// signal at all" warning, then an exact per-figure whitelist warning (passed into
+// reviseArticleForFactIssues's revision prompt, still used above). Three independent live
+// retests on the same Asana/Trello/ClickUp pricing topic all converged on the identical
+// result: the model wrote the exact same fabricated Asana/Trello prices and invented add-on
+// names every time, even when handed a computed whitelist stating in plain terms that those
+// exact figures don't appear in the fetched source text. That consistency across runs is
+// strong evidence the model is reproducing a specific remembered number with enough
+// confidence that no prompt-level instruction reliably overrides it.
 //
-// Rather than attempt a fourth, even more forceful prompt, this closes the gap mechanically:
-// after the self-correction loop above finishes (whether or not it actually cleared every
-// flagged issue), this function builds the union of every dollar figure that genuinely
-// appears anywhere across all fetched sources, then scans the final draft's text fields for
-// any dollar-figure-shaped substring NOT in that set and replaces it with a visible
-// placeholder. No model judgment is involved in this step, so a fabricated price can no
-// longer reach the stored article silently, regardless of what the model wrote.
+// Round 4 closed that gap mechanically for dollar figures instead of attempting a fourth,
+// even more forceful prompt: after the self-correction loop below finishes (whether or not
+// it actually cleared every flagged issue), this scans the final draft's text fields for any
+// dollar-figure-shaped substring not present anywhere in the fetched sources and replaces it
+// with a visible placeholder. A live retest confirmed this works: every previously-fabricated
+// Asana/Trello price in the stored content_md was correctly replaced, while genuinely
+// verified ClickUp figures passed through untouched.
 //
-// This deliberately checks against the union across all sources rather than trying to
-// attribute each figure in the article back to the one specific source it's describing
-// (the article's prose doesn't tag which sentence came from which source). The tradeoff is
-// a rare false negative if two different sources happen to share an identical-looking real
-// figure, which is an acceptable cost for guaranteeing fabricated figures never slip through.
+// That same retest showed needs_review stayed true for a different reason: the model had
+// shifted the identical fabrication behavior into non-dollar specifics the dollar-only check
+// couldn't see (e.g. "10MB per file" and "250MB per file" storage limits for Trello, neither
+// of which is on Trello's actual fetched pricing page). Round 5 extends the same exact-match
+// approach to storage-size figures and percentages, since both are mechanically close
+// cousins of a dollar figure: a number glued to a fixed, low-variance unit token, so exact
+// string verification (after normalizing away whitespace/case) is about as reliable here as
+// it is for "$10.99".
+//
+// This is deliberately NOT extended to count-based claims (board/collaborator/guest counts,
+// automation run counts) or named feature/process claims (e.g. "Atlassian Guard Standard", a
+// specific list of view types). Those have far higher surface-form variance against the
+// fetched text than a price or a storage size does ("5K" vs "5,000", "up to 10" vs "10",
+// singular vs plural noun forms), and named-feature claims aren't numeric at all, so an
+// exact-match regex redaction there would likely strip genuinely correct claims as often as
+// it catches fabricated ones, trading one failure mode for a worse one. Those categories stay
+// the responsibility of the self-correction loop above and human review in the dashboard,
+// not a code-level guarantee, until a more semantic (not purely regex) check is built for them.
+//
+// Checks against the union across all sources rather than trying to attribute each figure in
+// the article back to the one specific source it's describing (the article's prose doesn't
+// tag which sentence came from which source). The tradeoff is a rare false negative if two
+// different sources happen to share an identical-looking real figure, an acceptable cost for
+// guaranteeing fabricated figures of these kinds never silently reach a stored article.
 const PRICE_UNCONFIRMED_PLACEHOLDER = "[price unconfirmed, check the provider's current pricing page]";
+const FIGURE_UNCONFIRMED_PLACEHOLDER = "[figure unconfirmed, check the provider's current pricing page]";
 
-function buildVerifiedDollarFigureSet(fetchedSources: Record<string, string>): Set<string> {
+interface FigureRedactionRule {
+  pattern: RegExp;
+  verified: Set<string>;
+  placeholder: string;
+}
+
+function buildVerifiedFigureSet(fetchedSources: Record<string, string>, pattern: RegExp): Set<string> {
   const verified = new Set<string>();
   for (const text of Object.values(fetchedSources)) {
-    for (const figure of extractDollarFigures(text)) verified.add(figure);
+    for (const figure of extractFigures(text, pattern)) verified.add(figure);
   }
   return verified;
 }
 
-function redactUnverifiedDollarFigures(
+function buildFigureRedactionRules(fetchedSources: Record<string, string>): FigureRedactionRule[] {
+  return [
+    {
+      pattern: DOLLAR_FIGURE_PATTERN,
+      verified: buildVerifiedFigureSet(fetchedSources, DOLLAR_FIGURE_PATTERN),
+      placeholder: PRICE_UNCONFIRMED_PLACEHOLDER,
+    },
+    {
+      pattern: STORAGE_FIGURE_PATTERN,
+      verified: buildVerifiedFigureSet(fetchedSources, STORAGE_FIGURE_PATTERN),
+      placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER,
+    },
+    {
+      pattern: PERCENT_FIGURE_PATTERN,
+      verified: buildVerifiedFigureSet(fetchedSources, PERCENT_FIGURE_PATTERN),
+      placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER,
+    },
+  ];
+}
+
+function redactTextWithRules(text: string, rules: FigureRedactionRule[]): string {
+  return rules.reduce(
+    (result, { pattern, verified, placeholder }) =>
+      result.replace(pattern, (match) => {
+        const normalized = match.replace(/\s+/g, "").toUpperCase();
+        return verified.has(normalized) ? match : placeholder;
+      }),
+    text
+  );
+}
+
+function redactUnverifiedFiguresFromArticle(
   article: GeneratedArticle,
   fetchedSources: Record<string, string>
 ): GeneratedArticle {
-  const verified = buildVerifiedDollarFigureSet(fetchedSources);
-
-  const redact = (text: string): string =>
-    text.replace(DOLLAR_FIGURE_PATTERN, (match) => {
-      const normalized = match.replace(/\s+/g, "");
-      return verified.has(normalized) ? match : PRICE_UNCONFIRMED_PLACEHOLDER;
-    });
+  const rules = buildFigureRedactionRules(fetchedSources);
+  const redact = (text: string): string => redactTextWithRules(text, rules);
 
   return {
     ...article,
@@ -772,8 +841,8 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
   //
   // Whatever comes out of this block (the best self-corrected draft, or the original draft
   // if the loop never improved on it or failed outright) still passes through
-  // redactUnverifiedDollarFigures before returning — see that function's comment for why
-  // this final deterministic pass exists independent of how well the loop above worked.
+  // redactUnverifiedFiguresFromArticle before returning — see that function's comment for
+  // why this final deterministic pass exists independent of how well the loop above worked.
   try {
     const loopStartedAt = Date.now();
     let bestArticle = article;
@@ -794,10 +863,10 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
       bestCheck = revisedCheck;
     }
 
-    return { article: redactUnverifiedDollarFigures(bestArticle, fetchedSources), fetchedSources };
+    return { article: redactUnverifiedFiguresFromArticle(bestArticle, fetchedSources), fetchedSources };
   } catch {
     // Best-effort layer — fall through to the unmodified draft below, still redacted.
   }
 
-  return { article: redactUnverifiedDollarFigures(article, fetchedSources), fetchedSources };
+  return { article: redactUnverifiedFiguresFromArticle(article, fetchedSources), fetchedSources };
 }
