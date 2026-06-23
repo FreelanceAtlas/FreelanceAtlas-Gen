@@ -29,6 +29,13 @@ export interface FactCheckResult {
 
 export const FACT_CHECK_PASS_THRESHOLD = 90; // gate: publishing is blocked below this score
 
+// Bounds how long a single fact-check call can run. Without this, a hung or very slow
+// Anthropic request had no ceiling of its own and could eat the rest of the route's
+// 300s maxDuration, turning into an opaque platform-level 504 instead of a handled
+// failSoft() result. 60s is generous for a single tool-forced call but still leaves
+// the rest of the pipeline (generation, originality check, DB writes) real headroom.
+const FACT_CHECK_TIMEOUT_MS = 60_000;
+
 const FACTCHECK_TOOL = {
   name: "submit_fact_check",
   description: "Submit the fact-check results for the article.",
@@ -158,22 +165,36 @@ ${faqs.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n")}
 Fact-check this article against the supplied sources and the actual fetched text now by calling
 submit_fact_check.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8192,
-      system: systemPrompt,
-      tools: [FACTCHECK_TOOL],
-      tool_choice: { type: "tool", name: "submit_fact_check" },
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system: systemPrompt,
+        tools: [FACTCHECK_TOOL],
+        tool_choice: { type: "tool", name: "submit_fact_check" },
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+      // See FACT_CHECK_TIMEOUT_MS above — bounds worst-case latency so this stage can
+      // fail soft instead of consuming the rest of the route's request budget.
+      signal: AbortSignal.timeout(FACT_CHECK_TIMEOUT_MS),
+    });
+  } catch (err: any) {
+    const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+    return failSoft(
+      "(fact-check request errored)",
+      timedOut
+        ? `Fact-check request timed out after ${FACT_CHECK_TIMEOUT_MS / 1000}s.`
+        : `Fact-check request failed before completing: ${String(err?.message ?? err)}`
+    );
+  }
 
   if (!res.ok) {
     const text = await res.text();
