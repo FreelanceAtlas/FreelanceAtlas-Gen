@@ -128,6 +128,15 @@ before describing how any named company, platform, tool, law, or report actually
   confirm that exact number or that exact described detail is genuinely stated there. If you have
   not done that for a given claim in this conversation, you are not allowed to write that claim
   anywhere in the article, named source or not.
+- This is not satisfied by having merely called web_fetch on a source. If you fetched a page and its
+  returned text does not actually contain a specific dollar amount, percentage, or other figure for
+  the exact plan/tier you are describing (common on JS-rendered pricing pages, where the fetch may
+  only return marketing copy, navigation, or boilerplate instead of the real price table), then as
+  far as this rule is concerned that figure is UNVERIFIED, identically to a fetch that failed
+  outright. Do not fall back on the price you already know from training data just because you
+  technically called web_fetch on the right URL. Treat "I fetched the page but the real number
+  wasn't in what came back" exactly like "the fetch failed": drop the specific figure or generalize
+  it, per the next bullet, rather than writing the figure you recall from general knowledge.
 - A fact-check pass after you submit will re-read the actual fetched page text and reject any
   number or descriptive claim it cannot find stated there, even if it is plausible or happens to be
   correct from general knowledge, so guessing, rounding to a "typical" figure, or describing a
@@ -138,7 +147,7 @@ before describing how any named company, platform, tool, law, or report actually
   detail you wanted, you have exactly two options: fetch a different real source for it (e.g. a
   dedicated "how it works" or pricing page rather than the homepage), or drop the specific claim and
   rewrite the point in general, qualitative terms instead (e.g. "charges a percentage-based
-  commission that is higher early in a client relationship" instead of "20 percent", or "uses a
+  commission that is higher early in a project" instead of "20 percent", or "uses a
   multi-step vetting process before accepting freelancers" instead of naming an exact step count or
   describing steps you have not actually confirmed). Stating your best guess, a "typical" figure or
   process, or a remembered detail from training is not a third option.
@@ -164,10 +173,11 @@ before describing how any named company, platform, tool, law, or report actually
 - Final self-check before you call submit_article: reread your own draft and list, mentally, every
   dollar amount, percentage, fee, day count, ranking position, named statistic, vetting/process
   step, engagement type, pricing tier, or feature claim attached to a specific company, platform,
-  law, or report. For each one, confirm you actually fetched a source containing it earlier in this
-  conversation. If you cannot confirm that for a claim, go back and either fetch a source for it now
-  or remove/generalize it before submitting. Do not submit a draft containing a specific number or
-  descriptive claim you cannot trace back to a fetch you actually made.
+  law, or report. For each one, confirm the EXACT figure or detail (not a similar or remembered one)
+  is visible in text you actually fetched in this conversation. If you cannot point to that exact
+  figure in the fetched text, go back and either fetch a different real page for it now or
+  remove/generalize the claim before submitting. Do not submit a draft containing a specific number
+  or descriptive claim you cannot trace back to fetched text containing that same figure.
 
 ORIGINALITY (mandatory — this is checked after drafting, so treat it as a hard requirement, not a
 style preference):
@@ -340,6 +350,51 @@ function extractFetchedSourceText(content: unknown): Record<string, string> {
   return fetchedSources;
 }
 
+// Detects a dollar-amount-shaped figure ($5, $10.99, $1,200, etc.) anywhere in a string.
+// Used to flag, programmatically rather than by asking the model to notice on its own,
+// fetched source pages that were technically fetched but contain no actual price figures
+// at all — almost always a JS-rendered pricing page where the static fetch only captured
+// marketing copy/navigation instead of the real price table. See the comment on
+// findSourcesWithoutPriceSignal below for why this distinction matters.
+const DOLLAR_AMOUNT_PATTERN = /\$\s?\d/;
+
+// Pure prompt instructions telling the model "don't write a price you can't verify" were
+// not enough: live testing showed the model would still write specific competitor SaaS
+// prices it recalled from training (Asana $10.99/user, Trello $5/user, etc.) even when the
+// fetched page text for that exact source contained zero dollar figures, on both the
+// original draft and a revision pass that was explicitly told to fix exactly this. Telling
+// the model "the page might not have the data" is something it can rationalize past;
+// telling it "we already checked computationally, this page has zero dollar figures in it"
+// is a fact it cannot argue with. Returns the subset of fetchedSources URLs whose captured
+// text contains no dollar-amount pattern at all.
+function findSourcesWithoutPriceSignal(fetchedSources: Record<string, string>): string[] {
+  return Object.entries(fetchedSources)
+    .filter(([, text]) => !DOLLAR_AMOUNT_PATTERN.test(text))
+    .map(([url]) => url);
+}
+
+function buildNoPriceDataWarning(fetchedSources: Record<string, string>): string {
+  const noPriceUrls = findSourcesWithoutPriceSignal(fetchedSources);
+  if (noPriceUrls.length === 0) return "";
+
+  return `
+
+VERIFIED FACT (computed directly from the fetched text, not a model judgment call): the following
+fetched source(s) contain ZERO dollar-amount figures anywhere in the captured text. This has already
+been checked programmatically, it is not a matter of looking more carefully:
+${noPriceUrls.map((u) => `- ${u}`).join("\n")}
+
+For each of these sources, you are not permitted to state ANY specific dollar amount, fee, or price
+tied to it, including ones you recall from training data and believe are still accurate. That belief
+is exactly the failure mode this check exists to catch: the page was fetched, and it does not contain
+that number right now, so stating it anyway is exactly the unverified-claim violation SOURCE
+VERIFICATION prohibits. Either remove all specific pricing from the section discussing this source's
+product, or replace it with a direct, neutral pointer (e.g. "check [Product]'s pricing page directly
+for current rates"). This applies even if the missing price is for only one or two plans/tiers from a
+source while others are confirmed, generalize or point out only the specific unconfirmed figures, not
+ones the fetched text does confirm.`;
+}
+
 // --- Generation-time self-correction gate ----------------------------------------------
 // Relying on the downstream fact-check (src/app/api/generate/route.ts) as the only line of
 // defense meant every fabricated number reached a human editor as a "needs review" draft
@@ -439,19 +494,22 @@ plan's fetched text, trim it down to only the features you can point to verbatim
 the fetched text, even if that means a shorter list than the original draft had.
 
 For each flagged claim, first check whether the source it concerns actually appears in the FETCHED
-TEXT block below at all:
-- If that source's real fetched text IS present below and it actually contains the figure or
+TEXT block below at all, and whether that text actually contains the specific figure, not just the
+general topic:
+- If that source's real fetched text IS present below and it actually contains the EXACT figure or
   descriptive detail (the article may have just stated it slightly wrong, attributed it to the
   wrong source, or gotten a step or detail slightly off), correct the article so it matches the
   fetched text exactly.
-- If that source's real fetched text IS present below but does NOT contain that figure or detail at
-  all, remove the specific number, step count, or descriptive detail and any named-source
-  attribution tied to it, and rephrase the point in general, qualitative terms instead. For numeric
-  claims: write something like "a percentage-based fee that is typically higher early in a project"
-  rather than a specific invented percentage. For descriptive claims: write something like "uses a
-  multi-step vetting process before accepting freelancers" rather than naming an exact number or
-  sequence of steps you cannot confirm, or drop the named-entity specifics entirely if even a vague
-  version is not supported.
+- If that source's real fetched text IS present below but does NOT contain that exact figure or
+  detail at all, remove the specific number, step count, or descriptive detail and any named-source
+  attribution tied to it, and rephrase the point in general, qualitative terms instead. This applies
+  even if you personally recall the real number from general knowledge and believe it is accurate.
+  Recalled-from-training numbers are exactly what this fix is removing, they are not a substitute for
+  a number actually present in the fetched text. For numeric claims: write something like "a
+  percentage-based fee that is typically higher early in a project" rather than a specific invented
+  percentage. For descriptive claims: write something like "uses a multi-step vetting process before
+  accepting freelancers" rather than naming an exact number or sequence of steps you cannot confirm,
+  or drop the named-entity specifics entirely if even a vague version is not supported.
 - If that source is MISSING from the FETCHED TEXT block entirely (the fetch failed, was never
   attempted, or returned nothing usable), do not just soften the claim into generalized qualitative
   language about that entity's mechanism, since that is still an unverified claim about how a
@@ -463,7 +521,7 @@ TEXT block below at all:
 - Do not introduce any new specific number, statistic, process detail, feature claim, or
   named-source claim anywhere in the article that isn't already supported by the fetched text below.
 - Leave every other part of the article (structure, voice, unflagged claims, FAQs, keyword usage)
-  unchanged.
+  unchanged.${buildNoPriceDataWarning(fetchedSources)}
 
 Call submit_article exactly once with the complete, corrected article — every field, not just the
 parts you changed.`;
@@ -546,9 +604,13 @@ Editor notes: ${input.notes || "none"}
 Sources available below — remember, you only have each one's title/date/URL, not its content. Per
 SOURCE VERIFICATION, any specific number tied to a named company, platform, tool, law, or report
 (fee, percentage, dollar amount, day count, ranking, statistic) requires a web_fetch confirming it
-first, named source or not — otherwise drop it or generalize it. If a fetch for one of these sources
-fails or never succeeds, do not fall back on describing that source's specific mechanism in your own
-generalized words either, point the reader to the platform's own page instead. Build your own outline
+first, named source or not, and the fetched text must actually contain that exact figure, not just
+be a page you successfully fetched on the right topic. If a fetch for one of these sources fails, or
+succeeds but its returned text doesn't actually contain the figure you wanted (common on JS-rendered
+pricing pages, where a static fetch can return marketing copy instead of the real price table), drop
+the specific figure or generalize it rather than filling it in from what you already know about that
+product, and do not fall back on describing that source's specific mechanism in your own generalized
+words either, point the reader to the platform's own page instead. Build your own outline
 independently of these sources either way, per the ORIGINALITY rules:
 ${sourceBlock}
 
