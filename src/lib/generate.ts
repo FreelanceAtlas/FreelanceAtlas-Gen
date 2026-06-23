@@ -350,49 +350,61 @@ function extractFetchedSourceText(content: unknown): Record<string, string> {
   return fetchedSources;
 }
 
-// Detects a dollar-amount-shaped figure ($5, $10.99, $1,200, etc.) anywhere in a string.
-// Used to flag, programmatically rather than by asking the model to notice on its own,
-// fetched source pages that were technically fetched but contain no actual price figures
-// at all — almost always a JS-rendered pricing page where the static fetch only captured
-// marketing copy/navigation instead of the real price table. See the comment on
-// findSourcesWithoutPriceSignal below for why this distinction matters.
-const DOLLAR_AMOUNT_PATTERN = /\$\s?\d/;
+// Matches a dollar-amount-shaped figure ($5, $10.99, $1,200, etc.) anywhere in a string.
+const DOLLAR_FIGURE_PATTERN = /\$\s?\d[\d,]*(?:\.\d+)?/g;
 
-// Pure prompt instructions telling the model "don't write a price you can't verify" were
-// not enough: live testing showed the model would still write specific competitor SaaS
-// prices it recalled from training (Asana $10.99/user, Trello $5/user, etc.) even when the
-// fetched page text for that exact source contained zero dollar figures, on both the
-// original draft and a revision pass that was explicitly told to fix exactly this. Telling
-// the model "the page might not have the data" is something it can rationalize past;
-// telling it "we already checked computationally, this page has zero dollar figures in it"
-// is a fact it cannot argue with. Returns the subset of fetchedSources URLs whose captured
-// text contains no dollar-amount pattern at all.
-function findSourcesWithoutPriceSignal(fetchedSources: Record<string, string>): string[] {
-  return Object.entries(fetchedSources)
-    .filter(([, text]) => !DOLLAR_AMOUNT_PATTERN.test(text))
-    .map(([url]) => url);
+// For each fetched source, the exact set of dollar-figure substrings (e.g. "$10.99",
+// "$1,200") that literally appear in its captured text.
+//
+// An earlier version of this check (findSourcesWithoutPriceSignal, removed) only asked a
+// binary question: "does this page contain ANY dollar sign at all?" Live retesting on the
+// Asana/Trello/ClickUp pricing topic showed that question is too coarse to catch the real
+// failure: Asana's and Trello's fetched pricing pages are JS-rendered SPAs whose static
+// fetch never returns the real price table, but the captured marketing copy still happened
+// to contain at least one unrelated dollar figure somewhere on the page (a promo blurb, an
+// unrelated callout, etc.). That single stray figure was enough to make the binary check
+// pass, so the "this source has no price data" warning was silently omitted for exactly the
+// two sources that needed it, and the model went on to write fabricated Asana/Trello prices
+// it recalled from training, identically to before the check existed.
+//
+// Comparing against the exact extracted set instead of a yes/no flag closes that gap: a
+// fabricated $10.99 is still caught as unverified even when the source page has some other
+// real $0 or $49 mentioned elsewhere that has nothing to do with the claim being made.
+function extractDollarFigures(text: string): Set<string> {
+  const matches = text.match(DOLLAR_FIGURE_PATTERN) ?? [];
+  return new Set(matches.map((m) => m.replace(/\s+/g, "")));
 }
 
-function buildNoPriceDataWarning(fetchedSources: Record<string, string>): string {
-  const noPriceUrls = findSourcesWithoutPriceSignal(fetchedSources);
-  if (noPriceUrls.length === 0) return "";
+function buildPriceWhitelistWarning(fetchedSources: Record<string, string>): string {
+  const entries = Object.entries(fetchedSources);
+  if (entries.length === 0) return "";
+
+  const lines = entries.map(([url, text]) => {
+    const figures = extractDollarFigures(text);
+    const list =
+      figures.size > 0
+        ? Array.from(figures).join(", ")
+        : "(none — this page's fetched text contains zero dollar figures anywhere)";
+    return `- ${url}: ${list}`;
+  });
 
   return `
 
-VERIFIED FACT (computed directly from the fetched text, not a model judgment call): the following
-fetched source(s) contain ZERO dollar-amount figures anywhere in the captured text. This has already
-been checked programmatically, it is not a matter of looking more carefully:
-${noPriceUrls.map((u) => `- ${u}`).join("\n")}
+VERIFIED FACT (computed directly from the fetched text via exact string matching, not a model
+judgment call): here is the COMPLETE set of dollar-figure substrings that literally appear anywhere
+in each source's fetched text below. There is nothing else on the page besides what is listed:
+${lines.join("\n")}
 
-For each of these sources, you are not permitted to state ANY specific dollar amount, fee, or price
-tied to it, including ones you recall from training data and believe are still accurate. That belief
-is exactly the failure mode this check exists to catch: the page was fetched, and it does not contain
-that number right now, so stating it anyway is exactly the unverified-claim violation SOURCE
-VERIFICATION prohibits. Either remove all specific pricing from the section discussing this source's
-product, or replace it with a direct, neutral pointer (e.g. "check [Product]'s pricing page directly
-for current rates"). This applies even if the missing price is for only one or two plans/tiers from a
-source while others are confirmed, generalize or point out only the specific unconfirmed figures, not
-ones the fetched text does confirm.`;
+Any specific dollar amount, fee, or price you write that is tied to one of these sources and is NOT
+in that source's list above is fabricated, full stop, even if it looks like a perfectly reasonable
+price, even if you recognize it as that product's real current price from training data, and even if
+the source's list above contains some OTHER dollar figure (a different number being present on the
+page does not make a different, unlisted number you wrote up correct, it just means the page has some
+unrelated number on it). For any plan/tier price you cannot find verbatim in its source's list above,
+remove that specific figure and either generalize the point or point the reader to the product's own
+pricing page directly, per the instructions above. This applies per-figure: a source can have some
+listed figures that are genuinely confirmed (use those normally) while every other figure tied to it
+is still unconfirmed and must be removed or generalized.`;
 }
 
 // --- Generation-time self-correction gate ----------------------------------------------
@@ -521,7 +533,7 @@ general topic:
 - Do not introduce any new specific number, statistic, process detail, feature claim, or
   named-source claim anywhere in the article that isn't already supported by the fetched text below.
 - Leave every other part of the article (structure, voice, unflagged claims, FAQs, keyword usage)
-  unchanged.${buildNoPriceDataWarning(fetchedSources)}
+  unchanged.${buildPriceWhitelistWarning(fetchedSources)}
 
 Call submit_article exactly once with the complete, corrected article — every field, not just the
 parts you changed.`;
