@@ -364,6 +364,46 @@ const STORAGE_FIGURE_PATTERN = /\d[\d,]*(?:\.\d+)?\s?(?:KB|MB|GB|TB)\b/gi;
 // Matches a percentage figure (20%, 12.5%, etc.) anywhere in a string.
 const PERCENT_FIGURE_PATTERN = /\d[\d,]*(?:\.\d+)?\s?%/g;
 
+// Matches a count-based figure: a number (optionally comma-grouped or "K"-suffixed)
+// immediately followed by one of a fixed set of countable-noun phrases that recur in named
+// plan/tier feature claims (board/collaborator/seat counts, automation run counts, AI credit
+// allotments, etc.). See the Round 7 comment further down for why this needed a different
+// normalization strategy than the dollar/storage/percent rules above, rather than just
+// reusing DOLLAR_FIGURE_PATTERN's approach verbatim. Longer, more specific phrases are listed
+// before the shorter phrases they contain (e.g. "automation actions?" before "automations?")
+// so the regex engine's left-to-right alternative matching doesn't stop at a shorter partial
+// match ("automation") when the fuller phrase ("automation actions") is actually present.
+const COUNT_UNIT_WORDS = [
+  "automation actions?",
+  "active automations?",
+  "automations?",
+  "command runs?",
+  "(?:ai )?(?:super )?credits?",
+  "collaborators?",
+  "boards?",
+  "users?",
+  "members?",
+  "guests?",
+  "seats?",
+  "forms?",
+  "integrations?",
+  "dashboards?",
+  "views?",
+];
+
+// The unit phrase often isn't immediately adjacent to the number — "1,000 workspace
+// automation command runs" has "workspace" sitting between the number and the actual unit
+// phrase — so this allows up to 3 filler words in between. Two exclusions on those filler
+// words turned out to matter on a live test pass: "per"/"a"/"the" are exactly the connector
+// words that make a PRICE ("$5 per user per month") look like a count of "users" to this
+// pattern if left unguarded, so they're blocked from being treated as filler. The leading
+// `(?<!\$)` does the same job from the other direction, refusing to start a count match on a
+// digit that's actually part of a dollar amount.
+const COUNT_FIGURE_PATTERN = new RegExp(
+  `(?<!\\$)\\d[\\d,]*(?:\\.\\d+)?\\s?[kK]?(?:\\s+(?!per\\b|a\\b|the\\b)[a-zA-Z-]+){0,3}?\\s+(?:${COUNT_UNIT_WORDS.join("|")})\\b`,
+  "gi"
+);
+
 // For each fetched source, the exact set of figure substrings matching a given pattern
 // (e.g. "$10.99", "250MB", "20%") that literally appear in its captured text. Figures are
 // normalized (whitespace stripped, uppercased) so "250 MB" and "250mb" both collapse to the
@@ -384,9 +424,43 @@ const PERCENT_FIGURE_PATTERN = /\d[\d,]*(?:\.\d+)?\s?%/g;
 // Comparing against the exact extracted set instead of a yes/no flag closes that gap: a
 // fabricated $10.99 is still caught as unverified even when the source page has some other
 // real $0 or $49 mentioned elsewhere that has nothing to do with the claim being made.
-function extractFigures(text: string, pattern: RegExp): Set<string> {
+type FigureNormalizer = (raw: string) => string;
+
+const DEFAULT_FIGURE_NORMALIZER: FigureNormalizer = (raw) => raw.replace(/\s+/g, "").toUpperCase();
+
+// Normalizes a count-figure match ("5,000 automation actions", "5K Automations", "10 boards")
+// into a "<numeric value>|<normalized unit>" key, instead of the byte-for-byte string
+// normalization DEFAULT_FIGURE_NORMALIZER uses for dollar/storage/percent figures. See the
+// Round 7 comment further down for why this is necessary: a source page may state a count as
+// "5K Automations Per Month" while a correct article restates the identical real figure as
+// "5,000 automation actions per month" — those need to compare equal, which byte-for-byte
+// normalization alone could never do, since "5K" and "5,000" share no common substring.
+function normalizeCountFigure(raw: string): string {
+  const match = raw.match(/^(\d[\d,]*(?:\.\d+)?)\s?([kK])?\s*(.+)$/);
+  if (!match) return DEFAULT_FIGURE_NORMALIZER(raw);
+
+  const [, numberPart, kSuffix, unitPart] = match;
+  let value = parseFloat(numberPart.replace(/,/g, ""));
+  if (kSuffix) value *= 1000;
+
+  // Crude singularization (drop a trailing "s") so "board"/"boards" and "credit"/"credits"
+  // collapse to the same unit key regardless of which form the source page or the article
+  // happened to use.
+  const unit = unitPart
+    .toLowerCase()
+    .replace(/[^a-z]/g, "")
+    .replace(/s$/, "");
+
+  return `${value}|${unit}`;
+}
+
+function extractFigures(
+  text: string,
+  pattern: RegExp,
+  normalize: FigureNormalizer = DEFAULT_FIGURE_NORMALIZER
+): Set<string> {
   const matches = text.match(pattern) ?? [];
-  return new Set(matches.map((m) => m.replace(/\s+/g, "").toUpperCase()));
+  return new Set(matches.map(normalize));
 }
 
 function extractDollarFigures(text: string): Set<string> {
@@ -425,7 +499,7 @@ listed figures that are genuinely confirmed (use those normally) while every oth
 is still unconfirmed and must be removed or generalized.`;
 }
 
-// --- Deterministic post-processing backstop (Round 4, extended in Round 5/6) ------------
+// --- Deterministic post-processing backstop (Round 4, extended in Round 5/6/7) ----------
 // Rounds 1 through 3 all tried to fix the fabricated-price problem by making the prompt more
 // convincing: a severity-aware self-correction loop, then a binary "this source has no $
 // signal at all" warning, then an exact per-figure whitelist warning (passed into
@@ -454,15 +528,28 @@ is still unconfirmed and must be removed or generalized.`;
 // string verification (after normalizing away whitespace/case) is about as reliable here as
 // it is for "$10.99".
 //
-// This is deliberately NOT extended to count-based claims (board/collaborator/guest counts,
-// automation run counts) or named feature/process claims (e.g. "Atlassian Guard Standard", a
-// specific list of view types). Those have far higher surface-form variance against the
-// fetched text than a price or a storage size does ("5K" vs "5,000", "up to 10" vs "10",
-// singular vs plural noun forms), and named-feature claims aren't numeric at all, so an
-// exact-match regex redaction there would likely strip genuinely correct claims as often as
-// it catches fabricated ones, trading one failure mode for a worse one. Those categories stay
-// the responsibility of the self-correction loop above and human review in the dashboard,
-// not a code-level guarantee, until a more semantic (not purely regex) check is built for them.
+// This is deliberately NOT extended to named feature/process claims (e.g. "Atlassian Guard
+// Standard", a specific list of view types) — those aren't numeric at all, so exact-match
+// redaction has no number to anchor on and would just be guessing. That category stays the
+// responsibility of the self-correction loop above and human review in the dashboard.
+//
+// Count-based claims (board/collaborator/guest counts, automation run counts) were excluded
+// for the same reason through Round 6: higher surface-form variance against the fetched text
+// than a price or storage size ("5K" vs "5,000", singular vs plural noun forms). Round 7
+// closes that gap instead of leaving it unhandled, after a live retest of Round 6 turned up
+// two fabricated counts that slipped straight through: "Trello Free supports up to 10
+// collaborators per workspace" (the real, fetched figure is a 10-board cap, not a
+// collaborator cap) and "Trello's free plan includes 250 workspace command runs per month"
+// (no fetched source mentions a Free-tier command-run limit at all). Both are exactly the
+// kind of fabrication Round 4 already kills for dollar figures, just with a different unit.
+//
+// The fix is normalizeCountFigure (above) rather than reusing the byte-for-byte string
+// normalization the dollar/storage/percent rules use: it parses out the numeric value
+// (handling a "K" suffix as a x1000 multiplier and stripping comma grouping) and the unit
+// word (singularized) separately, then compares those parsed parts. That specifically
+// bridges the "5K Automations Per Month" vs "5,000 automation actions per month" gap that
+// blocked a naive extension before, while a board/collaborator/command-run figure with no
+// real source support anywhere still has nothing to match against and gets redacted.
 //
 // Round 5 checked every figure against the union of verified figures across ALL sources
 // rather than attributing each figure in the article back to the one specific source it's
@@ -505,12 +592,17 @@ interface FigureRedactionRule {
   // identifiable in the text immediately before a match, for a stricter, correctly-scoped check.
   byCompany: Map<string, Set<string>>;
   placeholder: string;
+  normalize: FigureNormalizer;
 }
 
-function buildVerifiedFigureSet(fetchedSources: Record<string, string>, pattern: RegExp): Set<string> {
+function buildVerifiedFigureSet(
+  fetchedSources: Record<string, string>,
+  pattern: RegExp,
+  normalize: FigureNormalizer = DEFAULT_FIGURE_NORMALIZER
+): Set<string> {
   const verified = new Set<string>();
   for (const text of Object.values(fetchedSources)) {
-    for (const figure of extractFigures(text, pattern)) verified.add(figure);
+    for (const figure of extractFigures(text, pattern, normalize)) verified.add(figure);
   }
   return verified;
 }
@@ -536,13 +628,14 @@ function deriveCompanyKey(url: string): string | null {
 
 function buildVerifiedFigureSetByCompany(
   fetchedSources: Record<string, string>,
-  pattern: RegExp
+  pattern: RegExp,
+  normalize: FigureNormalizer = DEFAULT_FIGURE_NORMALIZER
 ): Map<string, Set<string>> {
   const byCompany = new Map<string, Set<string>>();
   for (const [url, text] of Object.entries(fetchedSources)) {
     const key = deriveCompanyKey(url);
     if (!key) continue;
-    const figures = extractFigures(text, pattern);
+    const figures = extractFigures(text, pattern, normalize);
     const existing = byCompany.get(key) ?? new Set<string>();
     for (const figure of figures) existing.add(figure);
     byCompany.set(key, existing);
@@ -551,17 +644,19 @@ function buildVerifiedFigureSetByCompany(
 }
 
 function buildFigureRedactionRules(fetchedSources: Record<string, string>): FigureRedactionRule[] {
-  const patterns: { pattern: RegExp; placeholder: string }[] = [
+  const patterns: { pattern: RegExp; placeholder: string; normalize?: FigureNormalizer }[] = [
     { pattern: DOLLAR_FIGURE_PATTERN, placeholder: PRICE_UNCONFIRMED_PLACEHOLDER },
     { pattern: STORAGE_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER },
     { pattern: PERCENT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER },
+    { pattern: COUNT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: normalizeCountFigure },
   ];
 
-  return patterns.map(({ pattern, placeholder }) => ({
+  return patterns.map(({ pattern, placeholder, normalize = DEFAULT_FIGURE_NORMALIZER }) => ({
     pattern,
-    globalVerified: buildVerifiedFigureSet(fetchedSources, pattern),
-    byCompany: buildVerifiedFigureSetByCompany(fetchedSources, pattern),
+    globalVerified: buildVerifiedFigureSet(fetchedSources, pattern, normalize),
+    byCompany: buildVerifiedFigureSetByCompany(fetchedSources, pattern, normalize),
     placeholder,
+    normalize,
   }));
 }
 
@@ -584,7 +679,7 @@ function redactTextWithRules(text: string, rules: FigureRedactionRule[]): string
       const offset = typeof args[args.length - 2] === "number" ? (args[args.length - 2] as number) : 0;
       const fullString = typeof args[args.length - 1] === "string" ? (args[args.length - 1] as string) : result;
 
-      const normalized = match.replace(/\s+/g, "").toUpperCase();
+      const normalized = rule.normalize(match);
       const windowStart = Math.max(0, offset - CONTEXT_WINDOW_CHARS);
       const company = findCompanyInContext(fullString.slice(windowStart, offset), companyKeys);
       const verified = company ? rule.byCompany.get(company)! : rule.globalVerified;
