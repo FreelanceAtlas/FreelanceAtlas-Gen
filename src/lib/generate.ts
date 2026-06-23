@@ -407,6 +407,65 @@ listed figures that are genuinely confirmed (use those normally) while every oth
 is still unconfirmed and must be removed or generalized.`;
 }
 
+// --- Deterministic post-processing backstop (Round 4) -----------------------------------
+// Rounds 1 through 3 all tried to fix the fabricated-price problem by making the prompt more
+// convincing: a severity-aware self-correction loop, then a binary "this source has no $
+// signal at all" warning, then this exact per-figure whitelist warning above (passed into
+// reviseArticleForFactIssues's revision prompt). Three independent live retests on the same
+// Asana/Trello/ClickUp pricing topic all converged on the identical result: the model wrote
+// the exact same fabricated Asana/Trello prices and invented add-on names every time (e.g.
+// Asana Starter "$10.99/$13.49", a fictitious "Timesheets and Budgets add-on" at
+// "$5.99/user/month"), even when handed this function's own computed whitelist stating in
+// plain terms that those exact figures don't appear in the fetched source text. That
+// consistency across runs is strong evidence the model is reproducing a specific remembered
+// number with enough confidence that no prompt-level instruction reliably overrides it.
+//
+// Rather than attempt a fourth, even more forceful prompt, this closes the gap mechanically:
+// after the self-correction loop above finishes (whether or not it actually cleared every
+// flagged issue), this function builds the union of every dollar figure that genuinely
+// appears anywhere across all fetched sources, then scans the final draft's text fields for
+// any dollar-figure-shaped substring NOT in that set and replaces it with a visible
+// placeholder. No model judgment is involved in this step, so a fabricated price can no
+// longer reach the stored article silently, regardless of what the model wrote.
+//
+// This deliberately checks against the union across all sources rather than trying to
+// attribute each figure in the article back to the one specific source it's describing
+// (the article's prose doesn't tag which sentence came from which source). The tradeoff is
+// a rare false negative if two different sources happen to share an identical-looking real
+// figure, which is an acceptable cost for guaranteeing fabricated figures never slip through.
+const PRICE_UNCONFIRMED_PLACEHOLDER = "[price unconfirmed, check the provider's current pricing page]";
+
+function buildVerifiedDollarFigureSet(fetchedSources: Record<string, string>): Set<string> {
+  const verified = new Set<string>();
+  for (const text of Object.values(fetchedSources)) {
+    for (const figure of extractDollarFigures(text)) verified.add(figure);
+  }
+  return verified;
+}
+
+function redactUnverifiedDollarFigures(
+  article: GeneratedArticle,
+  fetchedSources: Record<string, string>
+): GeneratedArticle {
+  const verified = buildVerifiedDollarFigureSet(fetchedSources);
+
+  const redact = (text: string): string =>
+    text.replace(DOLLAR_FIGURE_PATTERN, (match) => {
+      const normalized = match.replace(/\s+/g, "");
+      return verified.has(normalized) ? match : PRICE_UNCONFIRMED_PLACEHOLDER;
+    });
+
+  return {
+    ...article,
+    title: redact(article.title),
+    meta_title: redact(article.meta_title),
+    meta_description: redact(article.meta_description),
+    h1: redact(article.h1),
+    content_md: redact(article.content_md),
+    faqs: article.faqs.map((f) => ({ question: redact(f.question), answer: redact(f.answer) })),
+  };
+}
+
 // --- Generation-time self-correction gate ----------------------------------------------
 // Relying on the downstream fact-check (src/app/api/generate/route.ts) as the only line of
 // defense meant every fabricated number reached a human editor as a "needs review" draft
@@ -710,6 +769,11 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
   // generation — any unexpected failure (timeout, network error, etc.) just falls through
   // to the best draft found so far (or the original, unmodified draft if nothing improved
   // on it), same as a normal "nothing flagged" outcome.
+  //
+  // Whatever comes out of this block (the best self-corrected draft, or the original draft
+  // if the loop never improved on it or failed outright) still passes through
+  // redactUnverifiedDollarFigures before returning — see that function's comment for why
+  // this final deterministic pass exists independent of how well the loop above worked.
   try {
     const loopStartedAt = Date.now();
     let bestArticle = article;
@@ -730,10 +794,10 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
       bestCheck = revisedCheck;
     }
 
-    return { article: bestArticle, fetchedSources };
+    return { article: redactUnverifiedDollarFigures(bestArticle, fetchedSources), fetchedSources };
   } catch {
-    // Best-effort layer — fall through to the unmodified draft below.
+    // Best-effort layer — fall through to the unmodified draft below, still redacted.
   }
 
-  return { article, fetchedSources };
+  return { article: redactUnverifiedDollarFigures(article, fetchedSources), fetchedSources };
 }
