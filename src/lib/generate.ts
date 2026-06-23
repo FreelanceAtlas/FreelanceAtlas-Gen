@@ -340,6 +340,15 @@ function extractFetchedSourceText(content: unknown): Record<string, string> {
 // The downstream check still runs independently afterward as the final, authoritative record.
 const SELF_CORRECTION_SEVERITIES = new Set(["high", "medium"]);
 
+// Bounds for the raw Anthropic fetch calls below. Without these, a single hung or very
+// slow request had no ceiling of its own and could consume the rest of the route's 300s
+// maxDuration, surfacing as an opaque platform-level 504 instead of a handled error or
+// fallback. The main generation call gets the largest share since it's the one doing real
+// work (drafting + up to 6 web_fetch round trips); the revision pass is a best-effort
+// bonus step layered on top of an already-good draft, so it gets a much tighter budget.
+const GENERATION_TIMEOUT_MS = 200_000;
+const REVISION_TIMEOUT_MS = 60_000;
+
 function buildIssuesBlock(issues: FactCheckIssue[]): string {
   return issues
     .map(
@@ -415,25 +424,32 @@ ${fetchedTextBlock}
 
 Fix the flagged issues now and call submit_article with the complete corrected article.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8000,
-      system: revisionSystemPrompt,
-      tools: [ARTICLE_TOOL],
-      tool_choice: { type: "tool", name: "submit_article" },
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
+  // Best-effort layer: any failure here — including a timeout or network error, not just
+  // a non-OK response — just means the original draft falls through to the downstream
+  // gate unchanged, not that generation itself fails.
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8000,
+        system: revisionSystemPrompt,
+        tools: [ARTICLE_TOOL],
+        tool_choice: { type: "tool", name: "submit_article" },
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+      signal: AbortSignal.timeout(REVISION_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
 
-  // Best-effort layer: any failure here just means the original draft falls through to
-  // the downstream gate unchanged, not that generation itself fails.
   if (!res.ok) return null;
 
   const data = await res.json();
@@ -485,31 +501,49 @@ ${faqBlock}
 Research and verify whatever specific facts you intend to cite, run the SOURCE VERIFICATION final
 self-check, then write the full FreelanceAtlas blog post by calling submit_article as your final step.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      // Fetched source pages now count against this turn's token budget alongside the
-      // article itself, so this needs more headroom than a plain single-shot generation.
-      max_tokens: 20000,
-      system: SYSTEM_PROMPT,
-      tools: [
-        // citations.enabled lets Claude anchor specific sentences to fetched pages, and
-        // (more importantly for us) guarantees fetch results come back as plain document
-        // text rather than some other shape, which extractFetchedSourceText relies on.
-        { type: "web_fetch_20250910", name: "web_fetch", max_uses: 10, citations: { enabled: true } },
-        ARTICLE_TOOL,
-      ],
-      // Must be "auto" (not forced to submit_article) so the model can call web_fetch
-      // first to verify facts, then call submit_article once it's actually ready.
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        // Fetched source pages now count against this turn's token budget alongside the
+        // article itself, so this needs more headroom than a plain single-shot generation.
+        max_tokens: 20000,
+        system: SYSTEM_PROMPT,
+        tools: [
+          // citations.enabled lets Claude anchor specific sentences to fetched pages, and
+          // (more importantly for us) guarantees fetch results come back as plain document
+          // text rather than some other shape, which extractFetchedSourceText relies on.
+          // max_uses capped at 6 (was 10) to bound worst-case latency when a source is slow
+          // or repeatedly fails to fetch — see GENERATION_TIMEOUT_MS below for the other
+          // half of that mitigation.
+          { type: "web_fetch_20250910", name: "web_fetch", max_uses: 6, citations: { enabled: true } },
+          ARTICLE_TOOL,
+        ],
+        // Must be "auto" (not forced to submit_article) so the model can call web_fetch
+        // first to verify facts, then call submit_article once it's actually ready.
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+      // Bounds how long this single call (including any web_fetch round trips) can run, so
+      // a slow/hanging fetch can't silently consume the rest of the route's 300s maxDuration
+      // and surface as an opaque platform-level 504. Failing here throws a clear, catchable
+      // error instead.
+      signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS),
+    });
+  } catch (err: any) {
+    const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+    throw new Error(
+      timedOut
+        ? `Generation timed out after ${GENERATION_TIMEOUT_MS / 1000}s, likely a slow or hanging source fetch. Try fewer/faster sources, or generate again.`
+        : `Generation request failed before completing: ${String(err?.message ?? err)}`
+    );
+  }
 
   if (!res.ok) {
     const text = await res.text();
@@ -538,19 +572,26 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
 
   // --- Self-correction gate (see comment above reviseArticleForFactIssues) --------------
   // Run the ground-truth fact-check now, before returning, instead of only downstream.
-  const initialCheck = await factCheckArticle(article.content_md, article.faqs, input.sources, fetchedSources);
-  const flagged = initialCheck.issues.filter((issue) => SELF_CORRECTION_SEVERITIES.has(issue.severity));
+  // Wrapped in try/catch so this best-effort layer can never crash the whole generation —
+  // any unexpected failure (timeout, network error, etc.) just falls through to the
+  // original, unmodified draft below, same as a normal "nothing flagged" outcome.
+  try {
+    const initialCheck = await factCheckArticle(article.content_md, article.faqs, input.sources, fetchedSources);
+    const flagged = initialCheck.issues.filter((issue) => SELF_CORRECTION_SEVERITIES.has(issue.severity));
 
-  if (flagged.length > 0) {
-    const revised = await reviseArticleForFactIssues(apiKey, article, fetchedSources, flagged);
-    if (revised) {
-      const revisedCheck = await factCheckArticle(revised.content_md, revised.faqs, input.sources, fetchedSources);
-      // Only keep the revision if it actually didn't make things worse — a botched fix
-      // attempt should never be allowed to silently replace a merely-flawed original.
-      if (revisedCheck.accuracy_score >= initialCheck.accuracy_score) {
-        return { article: revised, fetchedSources };
+    if (flagged.length > 0) {
+      const revised = await reviseArticleForFactIssues(apiKey, article, fetchedSources, flagged);
+      if (revised) {
+        const revisedCheck = await factCheckArticle(revised.content_md, revised.faqs, input.sources, fetchedSources);
+        // Only keep the revision if it actually didn't make things worse — a botched fix
+        // attempt should never be allowed to silently replace a merely-flawed original.
+        if (revisedCheck.accuracy_score >= initialCheck.accuracy_score) {
+          return { article: revised, fetchedSources };
+        }
       }
     }
+  } catch {
+    // Best-effort layer — fall through to the unmodified draft below.
   }
 
   return { article, fetchedSources };
