@@ -425,7 +425,7 @@ listed figures that are genuinely confirmed (use those normally) while every oth
 is still unconfirmed and must be removed or generalized.`;
 }
 
-// --- Deterministic post-processing backstop (Round 4, extended in Round 5) --------------
+// --- Deterministic post-processing backstop (Round 4, extended in Round 5/6) ------------
 // Rounds 1 through 3 all tried to fix the fabricated-price problem by making the prompt more
 // convincing: a severity-aware self-correction loop, then a binary "this source has no $
 // signal at all" warning, then an exact per-figure whitelist warning (passed into
@@ -464,17 +464,46 @@ is still unconfirmed and must be removed or generalized.`;
 // the responsibility of the self-correction loop above and human review in the dashboard,
 // not a code-level guarantee, until a more semantic (not purely regex) check is built for them.
 //
-// Checks against the union across all sources rather than trying to attribute each figure in
-// the article back to the one specific source it's describing (the article's prose doesn't
-// tag which sentence came from which source). The tradeoff is a rare false negative if two
-// different sources happen to share an identical-looking real figure, an acceptable cost for
-// guaranteeing fabricated figures of these kinds never silently reach a stored article.
+// Round 5 checked every figure against the union of verified figures across ALL sources
+// rather than attributing each figure in the article back to the one specific source it's
+// describing (the article's prose doesn't tag which sentence came from which source). A live
+// retest exposed the cost of that shortcut: a fabricated "Trello Premium: $10/user/month" was
+// left unredacted because *some* dollar figure happened to appear somewhere in the combined
+// Asana/Trello/ClickUp fetched text, even though Trello's own fetched page contained zero
+// dollar figures at all. A figure that's genuinely verified for one company was silently
+// treated as verifying an unrelated, fabricated figure for a different company.
+//
+// Round 6 closes that specific gap with a scoped check, without trying to solve full claim
+// attribution: for each match, look at a window of text immediately before it (see
+// CONTEXT_WINDOW_CHARS) for a mention of exactly one known company name (derived from each
+// fetched source's hostname). If exactly one company is identifiable nearby, verify the figure
+// only against that company's own fetched text, the stricter and more correct check. If zero
+// or multiple companies are mentioned nearby (e.g. a cross-company comparison sentence or the
+// Key Takeaways section, which legitimately references several companies' figures together),
+// fall back to the looser union-of-all-sources check from Round 5, since attribution is
+// genuinely ambiguous there and a false redaction of a correct cross-referenced figure is its
+// own failure mode. This keeps the common, unambiguous case (a figure inside a single
+// company's own pricing-tier section) strict, while leaving the genuinely ambiguous case no
+// worse than before.
 const PRICE_UNCONFIRMED_PLACEHOLDER = "[price unconfirmed, check the provider's current pricing page]";
 const FIGURE_UNCONFIRMED_PLACEHOLDER = "[figure unconfirmed, check the provider's current pricing page]";
 
+// How far back (in characters) before a figure's match position to look for a company-name
+// mention when deciding which source to scope verification against. Wide enough to cover a
+// company name stated earlier in the same bullet/sentence or in the subsection's heading
+// just above it, narrow enough to avoid pulling in an unrelated company mentioned several
+// paragraphs earlier in a long comparison post.
+const CONTEXT_WINDOW_CHARS = 400;
+
 interface FigureRedactionRule {
   pattern: RegExp;
-  verified: Set<string>;
+  // Fallback verified set: the union of this figure type across every fetched source. Used
+  // whenever the text around a match doesn't unambiguously identify a single company.
+  globalVerified: Set<string>;
+  // Per-company verified sets (keyed by a lowercase company key derived from each fetched
+  // source's hostname, e.g. "trello" from "trello.com"). Used when exactly one company is
+  // identifiable in the text immediately before a match, for a stricter, correctly-scoped check.
+  byCompany: Map<string, Set<string>>;
   placeholder: string;
 }
 
@@ -486,35 +515,83 @@ function buildVerifiedFigureSet(fetchedSources: Record<string, string>, pattern:
   return verified;
 }
 
+// Derives a simple lowercase company key from a fetched source's URL, e.g.
+// "https://www.trello.com/pricing" -> "trello", "https://asana.com/pricing" -> "asana".
+// Used both to build per-company verified sets and to recognize a company's name mentioned
+// in the article's own prose (the article writes plain English company names like "Trello",
+// which conveniently matches this same key case-insensitively in the vast majority of cases).
+function deriveCompanyKey(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    const labels = host.split(".").filter(Boolean);
+    if (labels.length === 0) return null;
+    // Second-level label covers the common case (trello.com -> trello, asana.com -> asana).
+    // Falls back to the first label for unusual hostnames with only one.
+    const key = labels.length >= 2 ? labels[labels.length - 2] : labels[0];
+    return key.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function buildVerifiedFigureSetByCompany(
+  fetchedSources: Record<string, string>,
+  pattern: RegExp
+): Map<string, Set<string>> {
+  const byCompany = new Map<string, Set<string>>();
+  for (const [url, text] of Object.entries(fetchedSources)) {
+    const key = deriveCompanyKey(url);
+    if (!key) continue;
+    const figures = extractFigures(text, pattern);
+    const existing = byCompany.get(key) ?? new Set<string>();
+    for (const figure of figures) existing.add(figure);
+    byCompany.set(key, existing);
+  }
+  return byCompany;
+}
+
 function buildFigureRedactionRules(fetchedSources: Record<string, string>): FigureRedactionRule[] {
-  return [
-    {
-      pattern: DOLLAR_FIGURE_PATTERN,
-      verified: buildVerifiedFigureSet(fetchedSources, DOLLAR_FIGURE_PATTERN),
-      placeholder: PRICE_UNCONFIRMED_PLACEHOLDER,
-    },
-    {
-      pattern: STORAGE_FIGURE_PATTERN,
-      verified: buildVerifiedFigureSet(fetchedSources, STORAGE_FIGURE_PATTERN),
-      placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER,
-    },
-    {
-      pattern: PERCENT_FIGURE_PATTERN,
-      verified: buildVerifiedFigureSet(fetchedSources, PERCENT_FIGURE_PATTERN),
-      placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER,
-    },
+  const patterns: { pattern: RegExp; placeholder: string }[] = [
+    { pattern: DOLLAR_FIGURE_PATTERN, placeholder: PRICE_UNCONFIRMED_PLACEHOLDER },
+    { pattern: STORAGE_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER },
+    { pattern: PERCENT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER },
   ];
+
+  return patterns.map(({ pattern, placeholder }) => ({
+    pattern,
+    globalVerified: buildVerifiedFigureSet(fetchedSources, pattern),
+    byCompany: buildVerifiedFigureSetByCompany(fetchedSources, pattern),
+    placeholder,
+  }));
+}
+
+// Looks for exactly one known company key mentioned in the text immediately before a match.
+// Returns that company key if exactly one is found, or null if zero or multiple are found
+// (an ambiguous or cross-company context, where the caller should fall back to the looser
+// global verified set rather than risk scoping against the wrong company).
+function findCompanyInContext(precedingText: string, companyKeys: string[]): string | null {
+  const context = precedingText.toLowerCase();
+  const found = companyKeys.filter((key) => context.includes(key));
+  return found.length === 1 ? found[0] : null;
 }
 
 function redactTextWithRules(text: string, rules: FigureRedactionRule[]): string {
-  return rules.reduce(
-    (result, { pattern, verified, placeholder }) =>
-      result.replace(pattern, (match) => {
-        const normalized = match.replace(/\s+/g, "").toUpperCase();
-        return verified.has(normalized) ? match : placeholder;
-      }),
-    text
-  );
+  return rules.reduce((result, rule) => {
+    const companyKeys = Array.from(rule.byCompany.keys());
+    return result.replace(rule.pattern, (match: string, ...args: unknown[]) => {
+      // Per String.replace's callback signature, when the pattern has no capture groups the
+      // last two arguments are always the match offset and the full input string.
+      const offset = typeof args[args.length - 2] === "number" ? (args[args.length - 2] as number) : 0;
+      const fullString = typeof args[args.length - 1] === "string" ? (args[args.length - 1] as string) : result;
+
+      const normalized = match.replace(/\s+/g, "").toUpperCase();
+      const windowStart = Math.max(0, offset - CONTEXT_WINDOW_CHARS);
+      const company = findCompanyInContext(fullString.slice(windowStart, offset), companyKeys);
+      const verified = company ? rule.byCompany.get(company)! : rule.globalVerified;
+
+      return verified.has(normalized) ? match : rule.placeholder;
+    });
+  }, text);
 }
 
 function redactUnverifiedFiguresFromArticle(
