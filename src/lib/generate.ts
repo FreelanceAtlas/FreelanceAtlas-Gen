@@ -373,8 +373,14 @@ const PERCENT_FIGURE_PATTERN = /\d[\d,]*(?:\.\d+)?\s?%/g;
 // before the shorter phrases they contain (e.g. "automation actions?" before "automations?")
 // so the regex engine's left-to-right alternative matching doesn't stop at a shorter partial
 // match ("automation") when the fuller phrase ("automation actions") is actually present.
+// "automation runs?" (Round 8) closes a gap a live retest found: a fresh generation phrased
+// the same underlying fabrication as "250 workspace automation runs per month" rather than
+// Round 7's "250 workspace command runs per month", and without this entry the alternation
+// stopped early at the shorter "automations?" match, capturing "...automation" and dropping
+// "runs" from the matched span instead of treating "automation runs" as its own unit phrase.
 const COUNT_UNIT_WORDS = [
   "automation actions?",
+  "automation runs?",
   "active automations?",
   "automations?",
   "command runs?",
@@ -499,7 +505,7 @@ listed figures that are genuinely confirmed (use those normally) while every oth
 is still unconfirmed and must be removed or generalized.`;
 }
 
-// --- Deterministic post-processing backstop (Round 4, extended in Round 5/6/7) ----------
+// --- Deterministic post-processing backstop (Round 4, extended in Round 5/6) ------------
 // Rounds 1 through 3 all tried to fix the fabricated-price problem by making the prompt more
 // convincing: a severity-aware self-correction loop, then a binary "this source has no $
 // signal at all" warning, then an exact per-figure whitelist warning (passed into
@@ -695,6 +701,126 @@ function redactUnverifiedFiguresFromArticle(
 ): GeneratedArticle {
   const rules = buildFigureRedactionRules(fetchedSources);
   const redact = (text: string): string => redactTextWithRules(text, rules);
+
+  return {
+    ...article,
+    title: redact(article.title),
+    meta_title: redact(article.meta_title),
+    meta_description: redact(article.meta_description),
+    h1: redact(article.h1),
+    content_md: redact(article.content_md),
+    faqs: article.faqs.map((f) => ({ question: redact(f.question), answer: redact(f.answer) })),
+  };
+}
+
+// --- Round 8: fact-check-issues-driven backstop ----------------------------------------
+// Round 7's live retest closed the two specific count fabrications it targeted, but the
+// same retest surfaced three more: "250 workspace automation runs per month" (a phrasing
+// variant of Round 6's "command runs" fabrication that COUNT_UNIT_WORDS didn't recognize as
+// a unit phrase, fixed above), plus "100 [lifetime] automations" and "1,000 automations per
+// month" on ClickUp, both genuinely unverified per the fetched ClickUp pricing page. The
+// pattern across Rounds 4 through 7 is structural: every round picks a new unit/phrasing
+// variant out of a live retest, fixes that one, and the next retest finds another, because
+// the regex side is reconstructing "is this fabricated" from scratch via company-scoped
+// verified-figure-set comparison, while factCheckArticle (src/lib/factcheck.ts) already
+// independently re-reads the real fetched text and answers that exact question per claim,
+// correctly, every round, including for the cases the regex side missed.
+//
+// Rather than keep chasing regex coverage indefinitely, this adds a second, independent
+// backstop that trusts that existing judgment directly: after the self-correction loop's
+// final fact-check, walk every HIGH severity issue (the consistently reliable severity in
+// every retest so far, see severityCounts/isImprovement above for why HIGH and MEDIUM aren't
+// treated the same), find any dollar/storage/percent/count figure-shaped substring inside
+// that issue's quoted `claim` text, and redact that exact literal substring everywhere it
+// appears in the article, regardless of whether COUNT_FIGURE_PATTERN's company-scoped logic
+// happened to already catch it. This only touches HIGH severity issues deliberately: every
+// example of HIGH so far in live testing has been a single isolated fabricated figure inside
+// the quoted claim, whereas MEDIUM issues seen in testing include true positives mixed with
+// lower-confidence calls and at least one case (an internal $10-vs-unconfirmed inconsistency)
+// where the quoted claim text contains a CORRECT figure alongside the flagged one, which would
+// make this same literal-substring approach redact a genuinely verified number if applied
+// there too. Restricting to HIGH keeps this safe.
+function escapeForLiteralRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Reuses the same four figure shapes the regex backstop already knows about (dollar/storage/
+// percent/count), but only to locate literal substrings worth redacting inside a claim quote,
+// not to verify them — verification was already done by factCheckArticle; this function exists
+// purely to find an exact, safely-narrow piece of text to replace, not to re-decide right/wrong.
+// Each entry also carries the matching normalize function (reused from the rules above) so a
+// match can be compared by parsed value, not literal text — see the `protectedKeys` comment
+// below for why that comparison has to be value-based rather than string-based here.
+const FLAGGED_FIGURE_PATTERNS: { pattern: RegExp; placeholder: string; normalize: FigureNormalizer }[] = [
+  { pattern: DOLLAR_FIGURE_PATTERN, placeholder: PRICE_UNCONFIRMED_PLACEHOLDER, normalize: DEFAULT_FIGURE_NORMALIZER },
+  { pattern: STORAGE_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: DEFAULT_FIGURE_NORMALIZER },
+  { pattern: PERCENT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: DEFAULT_FIGURE_NORMALIZER },
+  { pattern: COUNT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: normalizeCountFigure },
+];
+
+function redactFiguresFlaggedByFactCheck(
+  article: GeneratedArticle,
+  issues: FactCheckIssue[]
+): GeneratedArticle {
+  // Guards against a real false-positive a live test turned up: the fact-check model often
+  // quotes a whole sentence verbatim inside `claim`/`concern` (e.g. "...'The main limits are
+  // 60MB total storage and 100 lifetime automations.'"), and that sentence can legitimately
+  // contain BOTH the one fabricated figure the issue is actually about (100 lifetime
+  // automations) AND an unrelated, genuinely-correct figure from the same sentence (60MB,
+  // independently confirmed accurate by its own separate LOW severity issue elsewhere in the
+  // same fact-check result). A naive "redact every figure-shaped substring found inside a HIGH
+  // issue's text" would strip that correct 60MB too. Comparing by parsed value (via the same
+  // normalize functions the rest of this file already uses for verified-set comparison) rather
+  // than literal substring also catches surface-form variants like "5K Automations" (mentioned
+  // for contrast inside a HIGH issue's concern) vs. "5,000 automations" (the article's own
+  // correct phrasing for that same real figure) collapsing to the same value, not just an exact
+  // string match like "60MB" vs "60MB".
+  const protectedKeys = new Set<string>();
+  for (const issue of issues) {
+    if (issue.severity === "high") continue;
+    for (const text of [issue.claim, issue.concern]) {
+      for (const { pattern, normalize } of FLAGGED_FIGURE_PATTERNS) {
+        for (const match of text.match(pattern) ?? []) protectedKeys.add(normalize(match));
+      }
+    }
+  }
+
+  // Collect every literal figure substring to strip, paired with the right placeholder, from
+  // every HIGH severity claim quote. A Map (not a list of replacements) so the same fabricated
+  // figure flagged in two separate issues only needs one pass over the text.
+  const toRedact = new Map<string, string>();
+
+  for (const issue of issues) {
+    if (issue.severity !== "high") continue;
+    // Scan both `claim` and `concern`, not just `claim`: the fact-check model sometimes
+    // paraphrases `claim` into its own descriptive sentence (e.g. "Automations are capped at
+    // 1,000 per month [on ClickUp Unlimited]", unit-before-number, not a verbatim article
+    // quote at all) while the actual verbatim sentence from the article is embedded inside
+    // `concern` instead (e.g. concern: "...The article states 'even on Unlimited, hitting
+    // 1,000 automations per month means moving to Business.'..."). Pulling figure matches from
+    // both fields, rather than `claim` alone, is what actually catches that second case. This
+    // is still safe even when a field's text isn't a verbatim quote at all: a figure-shaped
+    // substring extracted from descriptive text that never appears verbatim in the article
+    // simply won't match anything when redact() runs replace() against the real text fields.
+    for (const text of [issue.claim, issue.concern]) {
+      for (const { pattern, placeholder, normalize } of FLAGGED_FIGURE_PATTERNS) {
+        const matches = text.match(pattern) ?? [];
+        for (const match of matches) {
+          if (protectedKeys.has(normalize(match))) continue;
+          toRedact.set(match, placeholder);
+        }
+      }
+    }
+  }
+
+  if (toRedact.size === 0) return article;
+
+  const redact = (text: string): string =>
+    Array.from(toRedact.entries()).reduce(
+      (result, [literal, placeholder]) =>
+        result.replace(new RegExp(escapeForLiteralRegex(literal), "g"), placeholder),
+      text
+    );
 
   return {
     ...article,
@@ -1013,8 +1139,9 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
   //
   // Whatever comes out of this block (the best self-corrected draft, or the original draft
   // if the loop never improved on it or failed outright) still passes through
-  // redactUnverifiedFiguresFromArticle before returning — see that function's comment for
-  // why this final deterministic pass exists independent of how well the loop above worked.
+  // redactUnverifiedFiguresFromArticle, then redactFiguresFlaggedByFactCheck (Round 8), before
+  // returning — see those functions' comments for why this two-layer final pass exists
+  // independent of how well the self-correction loop above worked.
   try {
     const loopStartedAt = Date.now();
     let bestArticle = article;
@@ -1035,7 +1162,9 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
       bestCheck = revisedCheck;
     }
 
-    return { article: redactUnverifiedFiguresFromArticle(bestArticle, fetchedSources), fetchedSources };
+    const regexRedacted = redactUnverifiedFiguresFromArticle(bestArticle, fetchedSources);
+    const finalArticle = redactFiguresFlaggedByFactCheck(regexRedacted, bestCheck.issues);
+    return { article: finalArticle, fetchedSources };
   } catch {
     // Best-effort layer — fall through to the unmodified draft below, still redacted.
   }
