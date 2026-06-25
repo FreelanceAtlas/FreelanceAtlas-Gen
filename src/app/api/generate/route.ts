@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { generateArticle } from "@/lib/generate";
+import { generateArticle, redactFiguresFlaggedByFactCheck } from "@/lib/generate";
 import { factCheckArticle } from "@/lib/factcheck";
 import { checkOriginality } from "@/lib/originality";
 import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from "@/lib/seo";
@@ -137,6 +137,33 @@ export async function POST(request: Request) {
     factCheckArticle(generated.content_md, generated.faqs, sources, fetchedSources),
     checkOriginality(generated.content_md, sources),
   ]);
+
+  // --- Round 9: re-apply the fact-check-issues redaction backstop against the
+  // AUTHORITATIVE fact-check result, not just generateArticle's internal one. -------------
+  // generateArticle() already runs redactFiguresFlaggedByFactCheck once, internally, against
+  // its own self-correction loop's bestCheck. But bestCheck is one specific LLM fact-check call
+  // made *during* generation; factCheck above is a separate, later LLM fact-check call against
+  // the same final text, and the two don't always agree — live retesting found a real case
+  // (Trello "10 collaborators" / "10 boards" / "250 workspace command runs per month") that
+  // this authoritative check flagged HIGH but the internal pass either missed or didn't act on
+  // in time, so it reached the stored article completely unredacted, with needs_review left
+  // true for an editor to catch by hand instead of being fixed automatically like every other
+  // HIGH severity figure fabrication this round-8 backstop was built to handle.
+  //
+  // Re-running the same deterministic, idempotent redaction here — keyed off factCheck.issues,
+  // the actual issues list that gets persisted and shown to the editor — closes that gap
+  // regardless of why the internal pass missed it. Figures already redacted by the internal
+  // pass simply won't match again (toRedact won't find that literal substring), so this is a
+  // strict improvement, never a regression: anything the internal pass already caught is a
+  // no-op here, and anything only the authoritative check catches now gets fixed too, instead
+  // of only ever being flagged.
+  const finalRedacted = redactFiguresFlaggedByFactCheck(generated, factCheck.issues);
+  generated.title = finalRedacted.title;
+  generated.meta_title = finalRedacted.meta_title;
+  generated.meta_description = finalRedacted.meta_description;
+  generated.h1 = finalRedacted.h1;
+  generated.content_md = finalRedacted.content_md;
+  generated.faqs = finalRedacted.faqs;
 
   const { data: article, error } = await supabase
     .from("articles")
