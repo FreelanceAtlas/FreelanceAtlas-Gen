@@ -746,11 +746,68 @@ function escapeForLiteralRegex(text: string): string {
 // Each entry also carries the matching normalize function (reused from the rules above) so a
 // match can be compared by parsed value, not literal text — see the `protectedKeys` comment
 // below for why that comparison has to be value-based rather than string-based here.
-const FLAGGED_FIGURE_PATTERNS: { pattern: RegExp; placeholder: string; normalize: FigureNormalizer }[] = [
+// Round 10: COUNT_FIGURE_PATTERN above only matches number-THEN-unit order ("250 automation
+// runs"). A live retest found a HIGH severity issue phrased the other way around — "Trello
+// Standard plan raises automation command runs to 1,000 per month" — where the unit word
+// ("command runs") sits before the number and "1,000" is immediately followed by "per month",
+// not by the unit word itself. COUNT_FIGURE_PATTERN structurally cannot match that: it requires
+// a unit word within 3 filler words AFTER the digit, and "per" is explicitly excluded as filler
+// (see the comment above COUNT_FIGURE_PATTERN), so a number-then-"per month" tail never matches.
+// The Round 9 comment above assumed `concern` would usually carry a number-first verbatim quote
+// even when `claim` didn't, but that's not guaranteed — the fact-check model can phrase both
+// fields unit-first, and when it does, the existing pattern finds nothing to redact at all,
+// despite the issue being correctly flagged HIGH.
+//
+// This adds a second, independent pattern for exactly that shape: a known count-unit word,
+// followed (with the same bounded filler allowance) by a number + "per <timeframe>" tail. Unlike
+// the other patterns, only the trailing "<number> per <timeframe>" portion is treated as the
+// literal to redact (via extractLiteral below), not the whole match — the unit word itself is
+// almost always genuine prose ("automation runs", "command runs" are real product terms), it's
+// specifically the number attached to it that's unverified. Scoped to the same HIGH-severity-only
+// backstop as the rest of this file, for the same safety reasons.
+const REVERSED_COUNT_TAIL_PATTERN = /(?<!\$)\d[\d,]*(?:\.\d+)?\s?[kK]?\s+per\s+(?:month|year|day|week)\b/i;
+
+const REVERSED_COUNT_FIGURE_PATTERN = new RegExp(
+  `(?:${COUNT_UNIT_WORDS.join("|")})\\b(?:\\s+(?!per\\b|a\\b|the\\b)[a-zA-Z'-]+){0,6}?\\s+${REVERSED_COUNT_TAIL_PATTERN.source}`,
+  "gi"
+);
+
+// Pulls just the "<number> per <timeframe>" tail out of a full reversed-pattern match, since
+// that's the only part actually worth redacting (see comment above).
+function extractReversedCountTail(rawMatch: string): string {
+  const tail = rawMatch.match(REVERSED_COUNT_TAIL_PATTERN);
+  return tail ? tail[0] : rawMatch;
+}
+
+// Normalizes a reversed-pattern tail ("1,000 per month", "5K per month") into a
+// "<numeric value>|per<timeframe>" key — deliberately not the same key space as
+// normalizeCountFigure (which includes the unit word), since here the unit word isn't part of
+// the literal being compared at all, only the number + timeframe.
+function normalizeReversedCountTail(raw: string): string {
+  const match = raw.match(/^(\d[\d,]*(?:\.\d+)?)\s?([kK])?\s+per\s+(\w+)/i);
+  if (!match) return DEFAULT_FIGURE_NORMALIZER(raw);
+  const [, numberPart, kSuffix, timeframe] = match;
+  let value = parseFloat(numberPart.replace(/,/g, ""));
+  if (kSuffix) value *= 1000;
+  return `${value}|per${timeframe.toLowerCase()}`;
+}
+
+const FLAGGED_FIGURE_PATTERNS: {
+  pattern: RegExp;
+  placeholder: string;
+  normalize: FigureNormalizer;
+  extractLiteral?: (rawMatch: string) => string;
+}[] = [
   { pattern: DOLLAR_FIGURE_PATTERN, placeholder: PRICE_UNCONFIRMED_PLACEHOLDER, normalize: DEFAULT_FIGURE_NORMALIZER },
   { pattern: STORAGE_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: DEFAULT_FIGURE_NORMALIZER },
   { pattern: PERCENT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: DEFAULT_FIGURE_NORMALIZER },
   { pattern: COUNT_FIGURE_PATTERN, placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER, normalize: normalizeCountFigure },
+  {
+    pattern: REVERSED_COUNT_FIGURE_PATTERN,
+    placeholder: FIGURE_UNCONFIRMED_PLACEHOLDER,
+    normalize: normalizeReversedCountTail,
+    extractLiteral: extractReversedCountTail,
+  },
 ];
 
 // Round 9: exported so route.ts can call this a second time against the *authoritative*
@@ -788,8 +845,11 @@ export function redactFiguresFlaggedByFactCheck(
   for (const issue of issues) {
     if (issue.severity === "high") continue;
     for (const text of [issue.claim, issue.concern]) {
-      for (const { pattern, normalize } of FLAGGED_FIGURE_PATTERNS) {
-        for (const match of text.match(pattern) ?? []) protectedKeys.add(normalize(match));
+      for (const { pattern, normalize, extractLiteral } of FLAGGED_FIGURE_PATTERNS) {
+        for (const rawMatch of text.match(pattern) ?? []) {
+          const literal = extractLiteral ? extractLiteral(rawMatch) : rawMatch;
+          protectedKeys.add(normalize(literal));
+        }
       }
     }
   }
@@ -812,11 +872,12 @@ export function redactFiguresFlaggedByFactCheck(
     // substring extracted from descriptive text that never appears verbatim in the article
     // simply won't match anything when redact() runs replace() against the real text fields.
     for (const text of [issue.claim, issue.concern]) {
-      for (const { pattern, placeholder, normalize } of FLAGGED_FIGURE_PATTERNS) {
+      for (const { pattern, placeholder, normalize, extractLiteral } of FLAGGED_FIGURE_PATTERNS) {
         const matches = text.match(pattern) ?? [];
-        for (const match of matches) {
-          if (protectedKeys.has(normalize(match))) continue;
-          toRedact.set(match, placeholder);
+        for (const rawMatch of matches) {
+          const literal = extractLiteral ? extractLiteral(rawMatch) : rawMatch;
+          if (protectedKeys.has(normalize(literal))) continue;
+          toRedact.set(literal, placeholder);
         }
       }
     }
