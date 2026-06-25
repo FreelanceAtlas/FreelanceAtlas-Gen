@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { generateArticle, redactFiguresFlaggedByFactCheck } from "@/lib/generate";
+import {
+  generateArticle,
+  redactFiguresFlaggedByFactCheck,
+  redactDescriptiveClaimsFlaggedByFactCheck,
+} from "@/lib/generate";
 import { factCheckArticle } from "@/lib/factcheck";
 import { checkOriginality } from "@/lib/originality";
 import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from "@/lib/seo";
@@ -157,7 +161,22 @@ export async function POST(request: Request) {
   // strict improvement, never a regression: anything the internal pass already caught is a
   // no-op here, and anything only the authoritative check catches now gets fixed too, instead
   // of only ever being flagged.
-  const finalRedacted = redactFiguresFlaggedByFactCheck(generated, factCheck.issues, fetchedSources);
+  // Round 12: pass cluster.name + primaryKeyword through too — see the Round 12 comment in
+  // generate.ts above buildCompanyKeys/extractCompanyKeysFromTopic for why source-hostname-only
+  // company detection isn't reliable when the AI fetches third-party aggregator pages instead of
+  // a vendor's own pricing page.
+  // Round 13: also apply the descriptive (non-numeric) claim backstop against the
+  // authoritative factCheck.issues, for the same reason Round 9 re-applies the figure
+  // backstop here — see the Round 13 comment in generate.ts above
+  // redactDescriptiveClaimsFlaggedByFactCheck for what this catches that the figure-only
+  // backstops above it cannot (e.g. "unlimited Power-Ups" with no number attached).
+  const figureRedacted = redactFiguresFlaggedByFactCheck(
+    generated,
+    factCheck.issues,
+    fetchedSources,
+    `${cluster.name} ${primaryKeyword}`
+  );
+  const finalRedacted = redactDescriptiveClaimsFlaggedByFactCheck(figureRedacted, factCheck.issues);
   generated.title = finalRedacted.title;
   generated.meta_title = finalRedacted.meta_title;
   generated.meta_description = finalRedacted.meta_description;
