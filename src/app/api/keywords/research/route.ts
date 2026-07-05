@@ -1,14 +1,4 @@
 // POST /api/keywords/research
-//
-// Body:
-//   seed          string    — the full article topic
-//   clusterId     string    — which cluster to save keywords under
-//   locationCode  number?   — DataForSEO location code (default 2840 = US)
-//   mode          string?   — "topic" (default) | "ideas" | "related" | "metrics"
-//   sourceContext string[]? — source titles fetched for this topic (improves Claude query generation)
-//   keywords      string[]  — required when mode="metrics"
-//   limit         number?   — max results to return (default 50)
-//   save          boolean?  — if true, upsert results into the keywords table
 
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
@@ -22,7 +12,37 @@ import {
 
 export const maxDuration = 60;
 
-// Derive a short fallback seed from a long article title.
+// Stopwords excluded when building the relevance token set from Claude queries.
+const QUERY_STOPWORDS = new Set([
+  "how", "to", "a", "an", "the", "and", "or", "of", "for", "in", "on",
+  "is", "vs", "with", "that", "this", "from", "your", "what", "why",
+  "when", "where", "who", "which", "can", "do", "does", "be", "are",
+  "prevent", "preventing", "define", "definition", "examples", "example",
+]);
+
+// Build a set of meaningful tokens across all Claude-generated queries.
+// Used to filter DataForSEO results so off-topic high-volume keywords
+// (e.g. resume templates when querying for scope-of-work templates) are dropped.
+function buildQueryTokens(queries: string[]): Set<string> {
+  const tokens = new Set<string>();
+  for (const q of queries) {
+    q.toLowerCase()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z]/g, ""))
+      .filter((w) => w.length > 2 && !QUERY_STOPWORDS.has(w))
+      .forEach((w) => tokens.add(w));
+  }
+  return tokens;
+}
+
+function isTopicRelevant(keyword: string, queryTokens: Set<string>): boolean {
+  const words = keyword
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ""));
+  return words.some((w) => w.length > 2 && queryTokens.has(w));
+}
+
 function deriveShortSeed(topic: string): string {
   return topic
     .replace(/\(.*?\)/g, "")
@@ -56,6 +76,7 @@ async function expandTopicToQueries(
   const prompt =
     `Article topic: "${topic}"${sourceBlock}\n\n` +
     `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
+    `Focus on the core subject — avoid generic words like "template", "examples", "definition", "free" unless the topic is specifically about those. ` +
     `Each query should cover a distinct angle or subtopic. ` +
     `Return only the queries, one per line, no numbering, no explanation.`;
 
@@ -147,11 +168,8 @@ export async function POST(request: Request) {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      // Step 1: Claude expands topic → 5 focused search queries
-      // Source titles from the UI give Claude real context about the topic.
       let queries = await expandTopicToQueries(seed!, sourceContext);
 
-      // Fallback: if Claude returned nothing, derive a short seed manually
       if (queries.length === 0) {
         const fallback = deriveShortSeed(seed!);
         console.log("[keywords/research] Claude returned 0 queries, falling back to:", fallback);
@@ -159,10 +177,15 @@ export async function POST(request: Request) {
       }
 
       debugQueries = queries;
-      console.log("[keywords/research] Fetching keyword_ideas for:", queries);
 
-      // Step 2: keyword_ideas for each query in parallel
-      const perQueryLimit = Math.max(12, Math.ceil(limit / queries.length) + 5);
+      // Build relevance token set from the queries themselves.
+      // This lets us drop off-topic high-volume results that share only a
+      // generic word (e.g. "template") with the query but aren't actually
+      // about the topic.
+      const queryTokens = buildQueryTokens(queries);
+      console.log("[keywords/research] Relevance tokens:", Array.from(queryTokens));
+
+      const perQueryLimit = Math.max(20, Math.ceil(limit / queries.length) + 10);
       const perQuery = await Promise.all(
         queries.map((q) =>
           getKeywordIdeas(q, { locationCode, limit: perQueryLimit })
@@ -177,11 +200,12 @@ export async function POST(request: Request) {
         )
       );
 
-      // Step 3: deduplicate and sort by volume
       const seen = new Set<string>();
       results = perQuery
         .flat()
         .filter((k) => {
+          // Must share a meaningful token with the Claude queries
+          if (!isTopicRelevant(k.keyword, queryTokens)) return false;
           const key = k.keyword.toLowerCase();
           if (seen.has(key)) return false;
           seen.add(key);
@@ -190,7 +214,7 @@ export async function POST(request: Request) {
         .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
         .slice(0, limit);
 
-      console.log(`[keywords/research] Final: ${results.length} keywords after dedup`);
+      console.log(`[keywords/research] Final: ${results.length} relevant keywords after dedup`);
 
     } else if (mode === "related") {
       results = await getRelatedKeywords(seed!, { locationCode, limit });
@@ -207,7 +231,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 
-  // --- Optionally persist into the keywords table -----------------------
   if (save && results.length > 0) {
     const rows = results.map((kw) => ({
       cluster_id: clusterId,
