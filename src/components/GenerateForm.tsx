@@ -133,21 +133,40 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   }
 
   // Derive a short, clean seed keyword from an article title so DataForSEO
-  // can find intent-matched ideas. Strips parentheticals and the leading
-  // "How to [verb] [article]" pattern, then stops at relative-clause words
-  // so "Freelance Scope of Work That Prevents..." -> "freelance scope of work".
+  // can find intent-matched ideas. Strategy:
+  //   1. Strip parentheticals
+  //   2. Strip leading question phrase ("How to", "What is", etc.)
+  //   3. Strip the leading action verb + any following article
+  //   4. Stop at relative-clause connectors ("that", "for", "with", etc.)
+  //   5. Take first 4 words of the remaining noun phrase
+  //
+  // "How to Write a Freelance Scope of Work That Prevents Scope Creep (Template)"
+  //   → "freelance scope of work"
+  // "How to Brand Your Freelance Business"
+  //   → "freelance business"
   function deriveSearchSeed(title: string): string {
-    const cleaned = title
-      .replace(/\s*\([^)]*\)/g, "")  // strip (With Template), (2026), etc.
-      .replace(/^(how to|what is|why|when|where|who|which|best way to|guide to)\s+(\w+\s+)?(a |an |the |your |my )?/i, "")
-      .trim();
+    // 1. Strip parentheticals
+    let s = title.replace(/\s*\([^)]*\)/g, "").trim();
 
-    // Stop at relative-clause / conjunction markers to isolate the core noun phrase
-    const STOP = /^(that|which|who|when|where|for|with|and|or|to|in|is|are)$/i;
-    const words = cleaned.split(/\s+/);
+    // 2. Strip leading question phrases
+    s = s.replace(/^(how to|what is|why|when|where|who|which|best way to|guide to)\s+/i, "").trim();
+
+    // 3. Strip the leading action verb + optional article
+    const parts = s.split(/\s+/);
+    if (parts.length > 3) {
+      const withoutVerb = parts.slice(1).join(" ");
+      s = withoutVerb.replace(/^(a |an |the |your |my )/i, "").trim();
+    }
+
+    // 4. Stop at relative-clause / conjunction markers
+    const STOP = /^(that|which|who|when|where|for|with|and|or|in|is|are|vs)$/i;
+    const words = s.split(/\s+/);
     const stopIdx = words.findIndex((w) => STOP.test(w));
-    const core = stopIdx > 1 ? words.slice(0, stopIdx) : words.slice(0, 5);
-    return core.join(" ").toLowerCase();
+    const core = stopIdx > 0 ? words.slice(0, stopIdx) : words.slice(0, 4);
+    const result = core.join(" ").toLowerCase().trim();
+
+    // Fallback: use first 4 words of cleaned title if derivation returns empty
+    return result || title.replace(/\s*\([^)]*\)/g, "").toLowerCase().split(/\s+/).slice(0, 4).join(" ");
   }
 
   // Fetch keyword ideas from DataForSEO using the primary keyword as seed.
@@ -459,8 +478,15 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
               </div>
             </div>
           )}
+          {dfsOpen && fetchingDFS && dfsSeed && (
+            <p className="mt-1 text-xs text-atlasnavy/50">
+              Searching DataForSEO for <span className="font-medium text-atlasteal">&ldquo;{dfsSeed}&rdquo;</span>…
+            </p>
+          )}
           {dfsOpen && !fetchingDFS && dfsKeywords.length === 0 && !dfsError && (
-            <p className="mt-1 text-xs text-atlasnavy/50">No keyword ideas returned — try a different topic.</p>
+            <p className="mt-1 text-xs text-atlasnavy/50">
+              No results for{dfsSeed ? <> <span className="font-medium text-atlasteal">&ldquo;{dfsSeed}&rdquo;</span></> : ""} — try editing the topic and searching again.
+            </p>
           )}
         </div>
 
