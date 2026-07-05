@@ -9,10 +9,10 @@
 // Pipeline:
 // 1. Claude generates 12 seeds across 3 categories
 // 2. Round 1: related_keywords for all seeds in parallel
-// 3. Round 2: related_keywords for top 5 by volume from round 1
-// 4. Claude batch-scores top 60: intent, audience_fit (1-5), cluster
+// 3. Round 2: related_keywords for top 4 by volume from round 1
+// 4. Claude batch-scores top 70: intent, audience_fit (1-5), cluster
 // 5. Opportunity = sqrt(vol) × (1-KD/100)² × intent_weight × audience_fit/5
-// 6. Return top results sorted by opportunity, filtered audience_fit >= 2
+// 6. Return top results sorted by opportunity, filtered audience_fit >= 3
 
 import { NextResponse } from "next/server";
 import {
@@ -44,11 +44,7 @@ export interface SeedCategories {
   problem: string[];
 }
 
-function opportunityScore(
-  kw: KeywordMetrics,
-  audienceFit: number,
-  intent: string
-): number {
+function opportunityScore(kw: KeywordMetrics, audienceFit: number, intent: string): number {
   const vol = Math.max(kw.volume ?? 0, 0);
   const kd = Math.min(Math.max(kw.difficulty ?? 50, 0), 100);
   const intentW = INTENT_WEIGHTS[intent] ?? 1.0;
@@ -56,23 +52,11 @@ function opportunityScore(
   return Math.round(Math.sqrt(vol) * Math.pow(1 - kd / 100, 2) * intentW * fitW * 100);
 }
 
-async function callClaude(
-  prompt: string,
-  maxTokens: number,
-  apiKey: string
-): Promise<string> {
+async function callClaude(prompt: string, maxTokens: number, apiKey: string): Promise<string> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }],
-    }),
+    headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
   });
   if (!res.ok) return "";
   const data = await res.json();
@@ -83,24 +67,18 @@ function parsePhrases(line: string): string[] {
   return line
     .split(",")
     .map((s) => s.trim().replace(/^[-*\d.)\s]+/, "").toLowerCase())
-    .filter((s) => {
-      const words = s.split(/\s+/);
-      return s.length > 3 && words.length >= 2 && words.length <= 4;
-    });
+    .filter((s) => { const words = s.split(/\s+/); return s.length > 3 && words.length >= 2 && words.length <= 4; });
 }
 
-async function generateSeeds(
-  topic: string,
-  apiKey: string
-): Promise<{ seeds: string[]; categories: SeedCategories }> {
+async function generateSeeds(topic: string, apiKey: string): Promise<{ seeds: string[]; categories: SeedCategories }> {
   const text = await callClaude(
     `Topic: "${topic}"\n` +
     `Target audience: freelancers (designers, writers, developers, consultants) growing their businesses.\n\n` +
-    `Generate 3 categories of 2-3 word keyword phrases (noun phrases only, no verbs, no qualifiers like "how to", "guide", "tips").\n\n` +
+    `Generate 3 categories of 2-3 word keyword phrases (noun phrases only, no verbs, no qualifiers).\n\n` +
     `CORE (4 phrases): Noun phrases that directly name this topic or its core concepts\n` +
-    `ADJACENT (4 phrases): Related topics a freelancer researching this would also search — same buyer journey, lateral topics (e.g. contracts, proposals, client management, pricing)\n` +
-    `PROBLEM (4 phrases): The pain points or problems this topic solves (e.g. scope creep, unpaid work, difficult clients)\n\n` +
-    `Return exactly this format, comma-separated on each line:\n` +
+    `ADJACENT (4 phrases): Related topics a freelancer researching this would also search — same buyer journey\n` +
+    `PROBLEM (4 phrases): The pain points or problems this topic solves\n\n` +
+    `Return exactly:\n` +
     `CORE: phrase1, phrase2, phrase3, phrase4\n` +
     `ADJACENT: phrase1, phrase2, phrase3, phrase4\n` +
     `PROBLEM: phrase1, phrase2, phrase3, phrase4`,
@@ -109,7 +87,6 @@ async function generateSeeds(
   );
 
   const categories: SeedCategories = { core: [], adjacent: [], problem: [] };
-
   for (const line of text.split("\n")) {
     const coreMatch = line.match(/^CORE:\s*(.+)/i);
     const adjMatch = line.match(/^ADJACENT:\s*(.+)/i);
@@ -119,44 +96,38 @@ async function generateSeeds(
     if (probMatch) categories.problem = parsePhrases(probMatch[1]).slice(0, 4);
   }
 
-  // Fallback: if parsing failed, treat all lines as core seeds
   if (categories.core.length === 0) {
-    categories.core = text
-      .split("\n")
+    categories.core = text.split("\n")
       .map((s) => s.trim().replace(/^[-*\d.)\s]+/, "").toLowerCase())
       .filter((s) => { const w = s.split(/\s+/); return s.length > 3 && w.length >= 2 && w.length <= 4; })
       .slice(0, 6);
   }
 
-  const seeds = [
-    ...categories.core,
-    ...categories.adjacent,
-    ...categories.problem,
-  ];
-
+  const seeds = [...categories.core, ...categories.adjacent, ...categories.problem];
   console.log("[research-engine] Seeds by category:", categories);
   return { seeds, categories };
 }
 
-async function scoreKeywords(
-  keywords: KeywordMetrics[],
-  topic: string,
-  apiKey: string
-): Promise<ScoredKeyword[]> {
+async function scoreKeywords(keywords: KeywordMetrics[], topic: string, apiKey: string): Promise<ScoredKeyword[]> {
   if (keywords.length === 0) return [];
 
   const kwList = keywords.map((k) => k.keyword).join("\n");
 
   const text = await callClaude(
-    `You are scoring keywords for FreelanceAtlas.com, a content site for freelancers growing their businesses.\n` +
-    `Topic context: "${topic}"\n` +
-    `Note: keywords may cover the core topic, adjacent topics, and related pain points — score all of them for freelancer relevance.\n\n` +
-    `For each keyword, return:\n` +
-    `- keyword: exact string as given\n` +
+    `You are a strict keyword relevance judge for FreelanceAtlas.com, targeting freelancers growing their businesses.\n` +
+    `Topic context: "${topic}"\n\n` +
+    `For each keyword, score audience_fit 1-5:\n` +
+    `  5 = directly about this topic, clearly freelancer-relevant\n` +
+    `  4 = adjacent topic a freelancer in this space would care about\n` +
+    `  3 = related pain point or lateral need (e.g. scope creep, client management)\n` +
+    `  2 = loosely related — might appear in content but not a target keyword\n` +
+    `  1 = unrelated to freelancing or this topic\n\n` +
+    `Rule: when in doubt, score lower. Only score 4-5 if you are confident.\n\n` +
+    `Also return:\n` +
     `- intent: informational | commercial | transactional | navigational\n` +
-    `- audience_fit: 1-5 (5 = directly useful for a freelancer growing their business, 1 = completely unrelated to freelancing)\n` +
     `- cluster: 2-4 word thematic group name\n\n` +
-    `Return ONLY a valid JSON array, no explanation, no markdown.\n\n` +
+    `Return ONLY a valid JSON array, no explanation:\n` +
+    `[{"keyword":"...","intent":"...","audience_fit":N,"cluster":"..."},...] \n\n` +
     `Keywords:\n${kwList}`,
     3500,
     apiKey
@@ -172,135 +143,80 @@ async function scoreKeywords(
 
   try {
     const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error("No JSON array found");
-
-    const scored = JSON.parse(jsonMatch[0]) as Array<{
-      keyword: string;
-      intent: string;
-      audience_fit: number;
-      cluster: string;
-    }>;
-
+    if (!jsonMatch) throw new Error("No JSON array");
+    const scored = JSON.parse(jsonMatch[0]) as Array<{ keyword: string; intent: string; audience_fit: number; cluster: string }>;
     const scoreMap = new Map(scored.map((s) => [s.keyword.toLowerCase().trim(), s]));
-
     return keywords.map((k) => {
       const s = scoreMap.get(k.keyword.toLowerCase().trim());
       const intent = s?.intent ?? (k.search_intent ?? "informational");
-      const audience_fit = Math.min(Math.max(Math.round(s?.audience_fit ?? 3), 1), 5);
+      const audience_fit = Math.min(Math.max(Math.round(s?.audience_fit ?? 2), 1), 5);
       const cluster = s?.cluster ?? "General";
       return { ...k, intent, audience_fit, cluster, opportunity: opportunityScore(k, audience_fit, intent) };
     });
   } catch (e) {
-    console.error("[research-engine] Score parse failed:", e, "\nRaw:", text.slice(0, 300));
+    console.error("[research-engine] Score parse failed:", e);
     return keywords.map(fallback);
   }
 }
 
-async function fetchRelatedWithFallback(
-  seed: string,
-  locationCode: number,
-  limit: number
-): Promise<KeywordMetrics[]> {
-  try {
-    const r = await getRelatedKeywords(seed, { locationCode, limit });
-    if (r.length > 0) return r;
-  } catch {}
-  try {
-    return await getKeywordIdeas(seed, { locationCode, limit });
-  } catch {
-    return [];
-  }
+async function fetchRelatedWithFallback(seed: string, locationCode: number, limit: number): Promise<KeywordMetrics[]> {
+  try { const r = await getRelatedKeywords(seed, { locationCode, limit }); if (r.length > 0) return r; } catch {}
+  try { return await getKeywordIdeas(seed, { locationCode, limit }); } catch { return []; }
 }
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const {
-    topic,
-    clusterId,
-    locationCode = DEFAULT_LOCATION_CODE,
-    limit = 40,
-  } = body as {
-    topic: string;
-    clusterId?: string;
-    locationCode?: number;
-    limit?: number;
+  const { topic, clusterId, locationCode = DEFAULT_LOCATION_CODE, limit = 40 } = body as {
+    topic: string; clusterId?: string; locationCode?: number; limit?: number;
   };
 
-  if (!topic?.trim()) {
-    return NextResponse.json({ error: "topic is required" }, { status: 400 });
-  }
+  if (!topic?.trim()) return NextResponse.json({ error: "topic is required" }, { status: 400 });
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json({ error: "ANTHROPIC_API_KEY not set" }, { status: 500 });
-  }
+  if (!apiKey) return NextResponse.json({ error: "ANTHROPIC_API_KEY not set" }, { status: 500 });
 
-  // --- Phase 1: Generate seeds (3 categories) ------------------------
+  // Phase 1: Generate seeds
   const { seeds, categories } = await generateSeeds(topic, apiKey);
+  if (seeds.length === 0) return NextResponse.json({ error: "Could not generate keyword seeds" }, { status: 502 });
 
-  if (seeds.length === 0) {
-    return NextResponse.json({ error: "Could not generate keyword seeds" }, { status: 502 });
-  }
-
-  // --- Phase 2: Round 1 — all seeds in parallel ----------------------
+  // Phase 2: Round 1
   const round1Results = await Promise.all(
-    seeds.map((s) =>
-      fetchRelatedWithFallback(s, locationCode, 20)
-        .then((r) => { console.log(`[research-engine] R1 "${s}" -> ${r.length}`); return r; })
-    )
+    seeds.map((s) => fetchRelatedWithFallback(s, locationCode, 20)
+      .then((r) => { console.log(`[research-engine] R1 "${s}" -> ${r.length}`); return r; }))
   );
 
   const seen = new Set<string>();
-  const pool1 = round1Results
-    .flat()
-    .filter((k) => {
-      const key = k.keyword.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
+  const pool1 = round1Results.flat()
+    .filter((k) => { const key = k.keyword.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; })
     .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
 
   console.log(`[research-engine] Round 1 pool: ${pool1.length}`);
 
-  // --- Phase 3: Round 2 — deepen from top volume results -------------
+  // Phase 3: Round 2 — deepen top results
   const round2Seeds = pool1.slice(0, 4).map((k) => k.keyword);
   const round2Results = await Promise.all(
-    round2Seeds.map((s) =>
-      fetchRelatedWithFallback(s, locationCode, 15)
-        .then((r) => { console.log(`[research-engine] R2 "${s}" -> ${r.length}`); return r; })
-    )
+    round2Seeds.map((s) => fetchRelatedWithFallback(s, locationCode, 15)
+      .then((r) => { console.log(`[research-engine] R2 "${s}" -> ${r.length}`); return r; }))
   );
 
   const allSeen = new Set(seen);
   const combined = [
     ...pool1,
-    ...round2Results.flat().filter((k) => {
-      const key = k.keyword.toLowerCase();
-      if (allSeen.has(key)) return false;
-      allSeen.add(key);
-      return true;
-    }),
+    ...round2Results.flat().filter((k) => { const key = k.keyword.toLowerCase(); if (allSeen.has(key)) return false; allSeen.add(key); return true; }),
   ].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
 
   console.log(`[research-engine] Combined pool: ${combined.length}`);
 
-  // --- Phase 4: Claude scoring top candidates -----------------------
+  // Phase 4: Score + strict filter (audience_fit >= 3)
   const toScore = combined.slice(0, 70);
   const scored = await scoreKeywords(toScore, topic, apiKey);
 
   const results = scored
-    .filter((k) => k.audience_fit >= 2)
+    .filter((k) => k.audience_fit >= 3) // strict: must be at least a related pain point
     .sort((a, b) => b.opportunity - a.opportunity)
     .slice(0, limit);
 
   console.log(`[research-engine] Final: ${results.length}`);
 
-  return NextResponse.json({
-    results,
-    seeds,
-    seedCategories: categories,
-    totalScanned: combined.length,
-    clusterId,
-  });
+  return NextResponse.json({ results, seeds, seedCategories: categories, totalScanned: combined.length, clusterId });
 }
