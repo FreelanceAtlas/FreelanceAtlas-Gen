@@ -24,9 +24,10 @@ function deriveShortSeed(topic: string): string {
     .toLowerCase();
 }
 
-// Ask Claude Haiku to generate 5 SHORT key phrases (2-3 words) for this topic.
-// These go directly into DataForSEO related_keywords — short clean noun phrases
-// stay semantically close; longer queries with verbs/qualifiers cause drift.
+// Ask Claude Haiku to generate 3 categories of seeds:
+//   CORE     (4): noun phrases naming the topic directly
+//   ADJACENT (4): lateral topics in the same freelancer buyer journey
+//   PROBLEM  (4): pain points this topic helps solve
 async function expandTopicToSeeds(
   topic: string,
   draftHeadings: string[] = [],
@@ -50,11 +51,15 @@ async function expandTopicToSeeds(
 
   const prompt =
     `Topic: "${topic}"${headingsBlock}${sourceBlock}\n` +
-    `List exactly 5 short keyword phrases (2-3 words each) that directly name the core concepts in this topic. ` +
-    `These will be used as seeds for a keyword research tool, so they must be clean noun phrases — ` +
-    `NO verbs, NO qualifiers like "how to", "definition", "strategy", "guide", "tips", "examples", "process". ` +
-    `Just the core subject-matter nouns. Each phrase should target a different concept. ` +
-    `Return only the phrases, one per line, no numbering.`;
+    `Target audience: freelancers (designers, writers, developers, consultants) growing their businesses.\n\n` +
+    `Generate 3 categories of 2-3 word keyword phrases (noun phrases only, no verbs, no qualifiers like "how to", "guide", "tips", "definition").\n\n` +
+    `CORE (4 phrases): Noun phrases that directly name this topic or its core concepts\n` +
+    `ADJACENT (4 phrases): Related topics a freelancer researching this would also search — same buyer journey, lateral topics (e.g. contracts, proposals, client management, pricing)\n` +
+    `PROBLEM (4 phrases): The pain points or problems this topic helps solve (e.g. scope creep, unpaid work, difficult clients)\n\n` +
+    `Return exactly this format, comma-separated on each line:\n` +
+    `CORE: phrase1, phrase2, phrase3, phrase4\n` +
+    `ADJACENT: phrase1, phrase2, phrase3, phrase4\n` +
+    `PROBLEM: phrase1, phrase2, phrase3, phrase4`;
 
   let data: Record<string, unknown>;
   try {
@@ -67,7 +72,7 @@ async function expandTopicToSeeds(
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 100,
+        max_tokens: 250,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -85,21 +90,39 @@ async function expandTopicToSeeds(
   if (!content || content[0]?.type !== "text") return [];
 
   const text = content[0].text ?? "";
-  console.log("[keywords/research] Claude seeds:", text);
+  console.log("[keywords/research] Claude seeds raw:", text);
 
-  return text
-    .split("\n")
-    .map((s) => s.trim().replace(/^[-\d\.\)\*\"]+\s*/, "").replace(/\"$/, "").toLowerCase())
-    .filter((s) => {
-      const words = s.split(/\s+/);
-      return s.length > 3 && words.length >= 2 && words.length <= 4;
-    })
-    .slice(0, 5);
+  const seeds: string[] = [];
+  for (const line of text.split("\n")) {
+    const match = line.match(/^(?:CORE|ADJACENT|PROBLEM):\s*(.+)/i);
+    if (match) {
+      const phrases = match[1]
+        .split(",")
+        .map((s) => s.trim().replace(/^[-*\d.)\s]+/, "").toLowerCase())
+        .filter((s) => {
+          const words = s.split(/\s+/);
+          return s.length > 3 && words.length >= 2 && words.length <= 4;
+        });
+      seeds.push(...phrases.slice(0, 4));
+    }
+  }
+
+  // Fallback: treat all lines as seeds if parse failed
+  if (seeds.length === 0) {
+    return text
+      .split("\n")
+      .map((s) => s.trim().replace(/^[-*\d.)\s]+/, "").toLowerCase())
+      .filter((s) => { const w = s.split(/\s+/); return s.length > 3 && w.length >= 2 && w.length <= 4; })
+      .slice(0, 6);
+  }
+
+  console.log("[keywords/research] Seeds:", seeds);
+  return seeds.slice(0, 12);
 }
 
-// Claude Haiku post-filter: given a pool of keyword candidates and the topic,
-// return only those that are genuinely relevant. Semantic understanding beats
-// token matching — handles any word being generic or specific depending on context.
+// Claude Haiku post-filter: keep keywords relevant to the topic OR its adjacent
+// buyer journey (related pain points, lateral freelancer needs). Intentionally
+// broader than exact-match — we want scope creep, client contracts, etc. to pass.
 async function semanticFilter(
   candidates: KeywordMetrics[],
   topic: string,
@@ -111,7 +134,7 @@ async function semanticFilter(
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return candidates.slice(0, limit);
 
-  const pool = candidates.slice(0, 80);
+  const pool = candidates.slice(0, 100);
   const kwList = pool.map((k) => k.keyword).join("\n");
 
   const headingsBlock =
@@ -121,10 +144,12 @@ async function semanticFilter(
 
   const prompt =
     `Topic: "${topic}"\n${headingsBlock}` +
-    `Below are keyword candidates. Return ONLY those genuinely relevant to this specific topic — ` +
-    `meaning someone searching that keyword is likely interested in content about this exact topic. ` +
-    `Exclude generic, unrelated, or only loosely connected keywords. ` +
-    `Return just the relevant keywords, one per line, exactly as written.\n\n${kwList}`;
+    `Target audience: freelancers growing their businesses.\n\n` +
+    `Below are keyword candidates. Keep a keyword if EITHER:\n` +
+    `(a) it is directly about this topic, OR\n` +
+    `(b) it is a related pain point, adjacent topic, or lateral freelancer need that someone researching this topic would also care about.\n\n` +
+    `Exclude only keywords that are clearly unrelated to freelancing or this topic area.\n` +
+    `Return just the kept keywords, one per line, exactly as written.\n\n${kwList}`;
 
   let data: Record<string, unknown>;
   try {
@@ -137,7 +162,7 @@ async function semanticFilter(
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 600,
+        max_tokens: 800,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -156,7 +181,7 @@ async function semanticFilter(
 
   const returned = (content[0].text ?? "")
     .split("\n")
-    .map((s) => s.trim().toLowerCase().replace(/^[-\*\d\.\)]+\s*/, ""))
+    .map((s) => s.trim().toLowerCase().replace(/^[-*\d.\)]+\s*/, ""))
     .filter((s) => s.length > 0 && s.split(" ").length <= 6);
 
   console.log(`[keywords/research] Claude kept ${returned.length} of ${pool.length}`);
@@ -164,7 +189,6 @@ async function semanticFilter(
   const keepSet = new Set(returned);
   const filtered = pool.filter((k) => keepSet.has(k.keyword.toLowerCase()));
 
-  // If Claude filtered everything (over-strict), fall back to top candidates
   if (filtered.length === 0) {
     console.warn("[keywords/research] Semantic filter returned 0 — falling back to top candidates");
     return candidates.slice(0, limit);
@@ -217,7 +241,7 @@ export async function POST(request: Request) {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      // 1. Claude generates short noun-phrase seeds
+      // 1. Claude generates 3-category seeds (core + adjacent + problem)
       let seeds = await expandTopicToSeeds(seed!, draftContext, sourceContext);
       if (seeds.length === 0) {
         const fallback = deriveShortSeed(seed!);
@@ -225,20 +249,16 @@ export async function POST(request: Request) {
         seeds = [fallback];
       }
       debugSeeds = seeds;
-      console.log("[keywords/research] Seeds:", seeds);
 
-      // 2. Use related_keywords for each seed — stays semantically close,
-      //    unlike keyword_ideas which can drift badly on multi-word seeds
-      const perSeedLimit = 25;
+      // 2. related_keywords for each seed in parallel
+      const perSeedLimit = 20;
       const perSeed = await Promise.all(
         seeds.map((s) =>
           getRelatedKeywords(s, { locationCode, limit: perSeedLimit })
             .then((r) => { console.log(`[keywords/research] related "${s}" -> ${r.length}`); return r; })
-            .catch((e) => {
-              console.error(`related_keywords failed for "${s}":`, e);
-              // fallback to keyword_ideas if related_keywords errors
-              return getKeywordIdeas(s, { locationCode, limit: perSeedLimit }).catch(() => [] as KeywordMetrics[]);
-            })
+            .catch(() =>
+              getKeywordIdeas(s, { locationCode, limit: perSeedLimit }).catch(() => [] as KeywordMetrics[])
+            )
         )
       );
 
@@ -256,7 +276,7 @@ export async function POST(request: Request) {
 
       console.log(`[keywords/research] Deduped pool: ${deduped.length}`);
 
-      // 4. Claude semantic post-filter
+      // 4. Claude semantic post-filter (broad — keeps adjacent + problem KWs)
       results = await semanticFilter(deduped, seed!, draftContext, limit);
 
     } else if (mode === "related") {
