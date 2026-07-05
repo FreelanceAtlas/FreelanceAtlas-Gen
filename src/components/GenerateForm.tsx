@@ -76,6 +76,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [fetchingDFS, setFetchingDFS] = useState(false);
   const [dfsError, setDfsError] = useState<string | null>(null);
   const [dfsOpen, setDfsOpen] = useState(false);
+  const [dfsSeed, setDfsSeed] = useState<string | null>(null);
 
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
   const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
@@ -132,18 +133,21 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   }
 
   // Derive a short, clean seed keyword from an article title so DataForSEO
-  // can find ideas. Strips parentheticals, leading question words, and caps
-  // at 5 words — e.g. "How to Create a Freelance Business Name (With 50+ Ideas)"
-  // becomes "freelance business name".
+  // can find intent-matched ideas. Strips parentheticals and the leading
+  // "How to [verb] [article]" pattern, then stops at relative-clause words
+  // so "Freelance Scope of Work That Prevents..." -> "freelance scope of work".
   function deriveSearchSeed(title: string): string {
-    return title
-      .replace(/\s*\([^)]*\)/g, "")           // strip parentheticals
-      .replace(/^(how to|what is|why|when|where|who|which|best way to|guide to)\s+/i, "")
-      .trim()
-      .split(/\s+/)
-      .slice(0, 5)
-      .join(" ")
-      .toLowerCase();
+    const cleaned = title
+      .replace(/\s*\([^)]*\)/g, "")  // strip (With Template), (2026), etc.
+      .replace(/^(how to|what is|why|when|where|who|which|best way to|guide to)\s+(\w+\s+)?(a |an |the |your |my )?/i, "")
+      .trim();
+
+    // Stop at relative-clause / conjunction markers to isolate the core noun phrase
+    const STOP = /^(that|which|who|when|where|for|with|and|or|to|in|is|are)$/i;
+    const words = cleaned.split(/\s+/);
+    const stopIdx = words.findIndex((w) => STOP.test(w));
+    const core = stopIdx > 1 ? words.slice(0, stopIdx) : words.slice(0, 5);
+    return core.join(" ").toLowerCase();
   }
 
   // Fetch keyword ideas from DataForSEO using the primary keyword as seed.
@@ -157,6 +161,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     setDfsKeywords([]);
     setDfsSelected(new Set());
     const seed = deriveSearchSeed(primaryKeyword);
+    setDfsSeed(seed);
     try {
       const res = await fetch("/api/keywords/research", {
         method: "POST",
@@ -164,7 +169,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         body: JSON.stringify({
           seed,
           clusterId,
-          mode: "ideas",
+          mode: "related",   // semantic intent, not just exact variants
           limit: 20,
           save: true,
         }),
@@ -391,7 +396,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             <div className="mt-2 rounded-md border border-atlasteal/30 bg-atlasteal/5 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-semibold text-atlasnavy">
-                  DataForSEO keyword ideas — click to select, then add:
+                  Related keywords for <span className="text-atlasteal">&ldquo;{dfsSeed}&rdquo;</span> — click to select:
                 </p>
                 <button
                   type="button"
