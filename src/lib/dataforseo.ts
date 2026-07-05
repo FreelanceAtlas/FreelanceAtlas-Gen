@@ -60,9 +60,26 @@ export interface KeywordMetrics {
 }
 
 // --- Keyword Ideas (DataForSEO Labs) ------------------------------------
-// Returns up to `limit` keyword ideas for a seed keyword, including full
-// metrics for each suggestion. Best for discovering new keyword opportunities
-// from a single seed term.
+// Returns keyword ideas for a seed keyword with full metrics.
+//
+// Response shape: tasks[0].result[0].items[] — each item has:
+//   keyword_info.search_volume, keyword_info.cpc, etc. (direct, not nested under keyword_data)
+//   keyword_properties.keyword_difficulty
+
+interface DfsKeywordIdeasItem {
+  keyword: string;
+  keyword_info: {
+    search_volume: number | null;
+    competition: number | null;
+    competition_level: string | null;
+    cpc: number | null;
+    monthly_searches: MonthlySearch[] | null;
+    search_intent: { main_intent: string } | null;
+  };
+  keyword_properties: {
+    keyword_difficulty: number | null;
+  };
+}
 
 interface DfsKeywordIdeasResponse {
   status_code: number;
@@ -72,19 +89,8 @@ interface DfsKeywordIdeasResponse {
     status_message: string;
     result: {
       keyword: string;
-      keyword_data: {
-        keyword_info: {
-          search_volume: number | null;
-          competition: number | null;
-          competition_level: string | null;
-          cpc: number | null;
-          monthly_searches: MonthlySearch[] | null;
-          search_intent: { main_intent: string } | null;
-        };
-      };
-      keyword_properties: {
-        keyword_difficulty: number | null;
-      };
+      items_count: number;
+      items: DfsKeywordIdeasItem[] | null;
     }[] | null;
   }[];
 }
@@ -120,23 +126,25 @@ export async function getKeywordIdeas(
   );
 
   const task = response.tasks?.[0];
-  if (!task || task.status_code !== 20000 || !task.result) return [];
+  if (!task || task.status_code !== 20000) return [];
 
-  return task.result.map((item) => ({
+  // Results are wrapped: result[0].items is the keyword array
+  const items = task.result?.[0]?.items;
+  if (!items) return [];
+
+  return items.map((item) => ({
     keyword: item.keyword,
-    volume: item.keyword_data?.keyword_info?.search_volume ?? null,
+    volume: item.keyword_info?.search_volume ?? null,
     difficulty: item.keyword_properties?.keyword_difficulty ?? null,
-    cpc: item.keyword_data?.keyword_info?.cpc ?? null,
-    competition: item.keyword_data?.keyword_info?.competition ?? null,
-    trend: item.keyword_data?.keyword_info?.monthly_searches ?? [],
-    search_intent: item.keyword_data?.keyword_info?.search_intent?.main_intent ?? null,
+    cpc: item.keyword_info?.cpc ?? null,
+    competition: item.keyword_info?.competition ?? null,
+    trend: item.keyword_info?.monthly_searches ?? [],
+    search_intent: item.keyword_info?.search_intent?.main_intent ?? null,
   }));
 }
 
 // --- Keyword Search Volume (Google Ads data) ---------------------------
 // Returns volume + CPC + competition for a list of known keywords.
-// Use this to enrich existing keywords with real metrics rather than
-// discovering new ones.
 
 interface DfsSearchVolumeResponse {
   status_code: number;
@@ -189,6 +197,7 @@ export async function getKeywordMetrics(
     const task = response.tasks?.[0];
     if (!task || task.status_code !== 20000 || !task.result) continue;
 
+    // search_volume/live returns result[] directly (one item per keyword)
     for (const item of task.result) {
       results.push({
         keyword: item.keyword,
@@ -206,8 +215,27 @@ export async function getKeywordMetrics(
 }
 
 // --- Related Keywords (DataForSEO Labs) --------------------------------
-// Returns keywords that are semantically related to the seed — broader
-// set than keyword_ideas, useful for finding cluster opportunities.
+// Returns keywords semantically related to the seed.
+//
+// Response shape: tasks[0].result[0].items[] — each item has:
+//   keyword_data.keyword_info (nested, unlike keyword_ideas)
+//   keyword_properties.keyword_difficulty
+
+interface DfsRelatedKeywordsItem {
+  keyword: string;
+  keyword_data: {
+    keyword_info: {
+      search_volume: number | null;
+      competition: number | null;
+      cpc: number | null;
+      monthly_searches: MonthlySearch[] | null;
+      search_intent: { main_intent: string } | null;
+    };
+  };
+  keyword_properties: {
+    keyword_difficulty: number | null;
+  };
+}
 
 interface DfsRelatedKeywordsResponse {
   status_code: number;
@@ -217,18 +245,8 @@ interface DfsRelatedKeywordsResponse {
     status_message: string;
     result: {
       keyword: string;
-      keyword_data: {
-        keyword_info: {
-          search_volume: number | null;
-          competition: number | null;
-          cpc: number | null;
-          monthly_searches: MonthlySearch[] | null;
-          search_intent: { main_intent: string } | null;
-        };
-      };
-      keyword_properties: {
-        keyword_difficulty: number | null;
-      };
+      items_count: number;
+      items: DfsRelatedKeywordsItem[] | null;
     }[] | null;
   }[];
 }
@@ -264,9 +282,13 @@ export async function getRelatedKeywords(
   );
 
   const task = response.tasks?.[0];
-  if (!task || task.status_code !== 20000 || !task.result) return [];
+  if (!task || task.status_code !== 20000) return [];
 
-  return task.result.map((item) => ({
+  // Results are wrapped: result[0].items is the keyword array
+  const items = task.result?.[0]?.items;
+  if (!items) return [];
+
+  return items.map((item) => ({
     keyword: item.keyword,
     volume: item.keyword_data?.keyword_info?.search_volume ?? null,
     difficulty: item.keyword_properties?.keyword_difficulty ?? null,
