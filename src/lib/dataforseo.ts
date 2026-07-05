@@ -132,15 +132,17 @@ export async function getKeywordIdeas(
   const items = task.result?.[0]?.items;
   if (!items) return [];
 
-  return items.map((item) => ({
-    keyword: item.keyword,
-    volume: item.keyword_info?.search_volume ?? null,
-    difficulty: item.keyword_properties?.keyword_difficulty ?? null,
-    cpc: item.keyword_info?.cpc ?? null,
-    competition: item.keyword_info?.competition ?? null,
-    trend: item.keyword_info?.monthly_searches ?? [],
-    search_intent: item.keyword_info?.search_intent?.main_intent ?? null,
-  }));
+  return items
+    .filter((item) => !!item.keyword)
+    .map((item) => ({
+      keyword: item.keyword,
+      volume: item.keyword_info?.search_volume ?? null,
+      difficulty: item.keyword_properties?.keyword_difficulty ?? null,
+      cpc: item.keyword_info?.cpc ?? null,
+      competition: item.keyword_info?.competition ?? null,
+      trend: item.keyword_info?.monthly_searches ?? [],
+      search_intent: item.keyword_info?.search_intent?.main_intent ?? null,
+    }));
 }
 
 // --- Keyword Search Volume (Google Ads data) ---------------------------
@@ -199,6 +201,7 @@ export async function getKeywordMetrics(
 
     // search_volume/live returns result[] directly (one item per keyword)
     for (const item of task.result) {
+      if (!item.keyword) continue;
       results.push({
         keyword: item.keyword,
         volume: item.search_volume ?? null,
@@ -288,13 +291,15 @@ export async function getRelatedKeywords(
   const items = task.result?.[0]?.items;
   if (!items) return [];
 
-  return items.map((item) => ({
-    keyword: item.keyword,
-    volume: item.keyword_data?.keyword_info?.search_volume ?? null,
-    difficulty: item.keyword_properties?.keyword_difficulty ?? null,
-    cpc: item.keyword_data?.keyword_info?.cpc ?? null,
-    competition: item.keyword_data?.keyword_info?.competition ?? null,
-    trend: item.keyword_data?.keyword_info?.monthly_searches ?? [],
-    search_intent: item.keyword_data?.keyword_info?.search_intent?.main_intent ?? null,
-  }));
+  return items
+    .filter((item) => !!item.keyword)
+    .map((item) => ({
+      keyword: item.keyword,
+      volume: item.keyword_data?.keyword_info?.search_volume ?? null,
+      difficulty: item.keyword_properties?.keyword_difficulty ?? null,
+      cpc: item.keyword_data?.keyword_info?.cpc ?? null,
+      competition: item.keyword_data?.keyword_info?.competition ?? null,
+      trend: item.keyword_data?.keyword_info?.monthly_searches ?? [],
+      search_intent: item.keyword_data?.keyword_info?.search_intent?.main_intent ?? null,
+    }));
 }

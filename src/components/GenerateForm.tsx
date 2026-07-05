@@ -180,10 +180,11 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         return;
       }
       const results: DFSKeyword[] = (data.results ?? [])
-        .filter((r: DFSKeyword) => r.keyword.toLowerCase() !== primaryKeyword.toLowerCase())
+        .filter((r: DFSKeyword) => r.keyword && r.keyword.toLowerCase() !== primaryKeyword.toLowerCase())
         .slice(0, 20);
       setDfsKeywords(results);
-    } catch {
+    } catch (err) {
+      console.error("DataForSEO fetch error:", err);
       setDfsError("DataForSEO lookup failed");
     } finally {
       setFetchingDFS(false);
