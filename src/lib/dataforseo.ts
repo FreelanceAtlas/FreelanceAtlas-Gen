@@ -63,8 +63,13 @@ export interface KeywordMetrics {
 // Returns keyword ideas for a seed keyword with full metrics.
 //
 // Response shape: tasks[0].result[0].items[] — each item has:
-//   keyword_info.search_volume, keyword_info.cpc, etc. (direct, not nested under keyword_data)
-//   keyword_properties.keyword_difficulty
+//   item.keyword                              string
+//   item.keyword_info.search_volume           number
+//   item.keyword_info.cpc                     number
+//   item.keyword_info.competition             number
+//   item.keyword_info.monthly_searches        array
+//   item.keyword_info.search_intent           { main_intent }
+//   item.keyword_properties.keyword_difficulty number
 
 interface DfsKeywordIdeasItem {
   keyword: string;
@@ -128,7 +133,6 @@ export async function getKeywordIdeas(
   const task = response.tasks?.[0];
   if (!task || task.status_code !== 20000) return [];
 
-  // Results are wrapped: result[0].items is the keyword array
   const items = task.result?.[0]?.items;
   if (!items) return [];
 
@@ -179,7 +183,6 @@ export async function getKeywordMetrics(
     languageCode = DEFAULT_LANGUAGE_CODE,
   } = options;
 
-  // DataForSEO Google Ads endpoint accepts up to 700 keywords per task.
   const BATCH = 700;
   const results: KeywordMetrics[] = [];
 
@@ -199,13 +202,12 @@ export async function getKeywordMetrics(
     const task = response.tasks?.[0];
     if (!task || task.status_code !== 20000 || !task.result) continue;
 
-    // search_volume/live returns result[] directly (one item per keyword)
     for (const item of task.result) {
       if (!item.keyword) continue;
       results.push({
         keyword: item.keyword,
         volume: item.search_volume ?? null,
-        difficulty: null, // Google Ads endpoint doesn't return difficulty
+        difficulty: null,
         cpc: item.cpc ?? null,
         competition: item.competition ?? null,
         trend: item.monthly_searches ?? [],
@@ -220,24 +222,36 @@ export async function getKeywordMetrics(
 // --- Related Keywords (DataForSEO Labs) --------------------------------
 // Returns keywords semantically related to the seed.
 //
-// Response shape: tasks[0].result[0].items[] — each item has:
-//   keyword_data.keyword_info (nested, unlike keyword_ideas)
-//   keyword_properties.keyword_difficulty
+// IMPORTANT: The response structure nests everything under keyword_data:
+//   item.keyword_data.keyword                              string
+//   item.keyword_data.keyword_info.search_volume           number
+//   item.keyword_data.keyword_info.cpc                     number
+//   item.keyword_data.keyword_info.competition             number
+//   item.keyword_data.keyword_info.monthly_searches        array
+//   item.keyword_data.keyword_info.search_intent_info      { main_intent }
+//   item.keyword_data.keyword_properties.keyword_difficulty number
+//
+// Unlike keyword_ideas where keyword and metrics live at the top level,
+// here everything is under keyword_data.
 
 interface DfsRelatedKeywordsItem {
-  keyword: string;
   keyword_data: {
+    keyword: string;
     keyword_info: {
       search_volume: number | null;
       competition: number | null;
       cpc: number | null;
       monthly_searches: MonthlySearch[] | null;
-      search_intent: { main_intent: string } | null;
+      // DataForSEO uses search_intent_info (not search_intent) in related_keywords
+      search_intent_info?: { main_intent: string } | null;
+      search_intent?: { main_intent: string } | null;
+    };
+    keyword_properties: {
+      keyword_difficulty: number | null;
     };
   };
-  keyword_properties: {
-    keyword_difficulty: number | null;
-  };
+  depth: number;
+  related_keywords: string[] | null;
 }
 
 interface DfsRelatedKeywordsResponse {
@@ -287,19 +301,27 @@ export async function getRelatedKeywords(
   const task = response.tasks?.[0];
   if (!task || task.status_code !== 20000) return [];
 
-  // Results are wrapped: result[0].items is the keyword array
   const items = task.result?.[0]?.items;
   if (!items) return [];
 
   return items
-    .filter((item) => !!item.keyword)
-    .map((item) => ({
-      keyword: item.keyword,
-      volume: item.keyword_data?.keyword_info?.search_volume ?? null,
-      difficulty: item.keyword_properties?.keyword_difficulty ?? null,
-      cpc: item.keyword_data?.keyword_info?.cpc ?? null,
-      competition: item.keyword_data?.keyword_info?.competition ?? null,
-      trend: item.keyword_data?.keyword_info?.monthly_searches ?? [],
-      search_intent: item.keyword_data?.keyword_info?.search_intent?.main_intent ?? null,
-    }));
+    // keyword is nested under keyword_data, not at item level
+    .filter((item) => !!item.keyword_data?.keyword)
+    .map((item) => {
+      const kd = item.keyword_data;
+      const ki = kd.keyword_info;
+      return {
+        keyword: kd.keyword,
+        volume: ki?.search_volume ?? null,
+        difficulty: kd.keyword_properties?.keyword_difficulty ?? null,
+        cpc: ki?.cpc ?? null,
+        competition: ki?.competition ?? null,
+        trend: ki?.monthly_searches ?? [],
+        // DataForSEO uses search_intent_info in related_keywords
+        search_intent:
+          ki?.search_intent_info?.main_intent ??
+          ki?.search_intent?.main_intent ??
+          null,
+      };
+    });
 }
