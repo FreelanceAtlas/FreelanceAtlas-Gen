@@ -13,24 +13,29 @@ import {
 export const maxDuration = 60;
 
 // Words excluded when building relevance tokens from Claude's queries.
-// Short or generic words that appear in many unrelated keyword searches
-// must be excluded so they don't pull in off-topic results.
+// These are words that appear in many unrelated keyword searches, so a single
+// token match on them would let through irrelevant results.
+// Rule of thumb: if the word alone could mean dozens of different things,
+// it belongs here.
 const QUERY_STOPWORDS = new Set([
   // Articles / prepositions / conjunctions
   "how", "to", "a", "an", "the", "and", "or", "of", "for", "in", "on",
   "is", "vs", "with", "that", "this", "from", "your", "what", "why",
   "when", "where", "who", "which", "can", "do", "does", "be", "are",
-  // Generic verbs / nouns that appear in millions of unrelated searches
+  // Generic action verbs
   "work", "write", "writing", "written", "make", "get", "use", "using",
   "create", "build", "find", "manage", "run", "set", "keep", "need",
+  "check", "avoid", "start", "choose", "helps", "learn", "grow",
+  // Generic search / lookup words — "search" alone matches every entity lookup
+  "search", "lookup", "finder",
   // Generic document/content words
   "template", "templates", "example", "examples", "definition", "guide",
   "tips", "tool", "tools", "type", "types", "list", "free", "best", "top",
-  "statement", "sample", "samples",
-  // Generic business/work words too broad to be signals
-  "service", "services", "business", "study", "job", "jobs",
-  "online", "site", "page", "level", "central", "admin",
-  // Filler from academic / unrelated queries
+  "statement", "sample", "samples", "ideas", "names",
+  // Generic nouns too broad to be meaningful signals
+  "service", "services", "business", "study", "job", "jobs", "brand",
+  "online", "site", "page", "level", "central", "admin", "media", "legal",
+  // Academic / unrelated query filler
   "cited", "mla", "asl", "busy", "custodial", "randstad",
   "prevent", "preventing", "define",
 ]);
@@ -100,10 +105,10 @@ async function expandTopicToQueries(
 
   const prompt =
     `Article topic: "${topic}"${headingsBlock}${sourceBlock}\n` +
-    `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
-    `Use the core subject matter and section angles above — avoid generic words like "template", "examples", ` +
-    `"definition", "free", "tips", or "guide" unless essential. ` +
-    `Each query should cover a distinct angle. ` +
+    `List exactly 5 specific Google search queries (2-4 words each) a freelancer would type to research this topic. ` +
+    `Focus on the specific subject matter — do NOT use generic words like ` +
+    `"search", "check", "ideas", "tips", "guide", "examples", "template", "free", "best", "names", "brand", "media", "legal". ` +
+    `Each query should target a distinct, concrete angle. ` +
     `Return only the queries, one per line, no numbering, no explanation.`;
 
   let data: Record<string, unknown>;
