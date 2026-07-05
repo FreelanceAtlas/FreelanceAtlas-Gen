@@ -26,7 +26,7 @@ const QUERY_STOPWORDS = new Set([
   // Generic document/content words
   "template", "templates", "example", "examples", "definition", "guide",
   "tips", "tool", "tools", "type", "types", "list", "free", "best", "top",
-  "statement", "statement", "sample", "samples",
+  "statement", "sample", "samples",
   // Generic business/work words too broad to be signals
   "service", "services", "business", "study", "job", "jobs",
   "online", "site", "page", "level", "central", "admin",
@@ -36,7 +36,6 @@ const QUERY_STOPWORDS = new Set([
 ]);
 
 // Minimum token length to be considered a relevance signal.
-// Short words (3-4 chars) are too generic even if not in the stopword list.
 const MIN_TOKEN_LENGTH = 5;
 
 function buildQueryTokens(queries: string[]): Set<string> {
@@ -52,7 +51,7 @@ function buildQueryTokens(queries: string[]): Set<string> {
 }
 
 function isTopicRelevant(keyword: string, queryTokens: Set<string>): boolean {
-  if (queryTokens.size === 0) return true; // no tokens = no filter
+  if (queryTokens.size === 0) return true;
   const words = keyword
     .toLowerCase()
     .split(/\s+/)
@@ -74,13 +73,22 @@ function deriveShortSeed(topic: string): string {
 
 async function expandTopicToQueries(
   topic: string,
-  sourceContext: string[] = []
+  sourceContext: string[] = [],
+  draftHeadings: string[] = []
 ): Promise<string[]> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("[keywords/research] ANTHROPIC_API_KEY not set");
     return [];
   }
+
+  const headingsBlock =
+    draftHeadings.length > 0
+      ? `\nThe article will cover these sections:\n${draftHeadings
+          .slice(0, 8)
+          .map((h) => `- ${h}`)
+          .join("\n")}\n`
+      : "";
 
   const sourceBlock =
     sourceContext.length > 0
@@ -91,10 +99,11 @@ async function expandTopicToQueries(
       : "";
 
   const prompt =
-    `Article topic: "${topic}"${sourceBlock}\n\n` +
+    `Article topic: "${topic}"${headingsBlock}${sourceBlock}\n` +
     `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
-    `Use the core subject matter — avoid generic words like "template", "examples", "definition", "free", "tips", or "guide" unless essential. ` +
-    `Each query should cover a distinct angle or subtopic. ` +
+    `Use the core subject matter and section angles above — avoid generic words like "template", "examples", ` +
+    `"definition", "free", "tips", or "guide" unless essential. ` +
+    `Each query should cover a distinct angle. ` +
     `Return only the queries, one per line, no numbering, no explanation.`;
 
   let data: Record<string, unknown>;
@@ -153,6 +162,7 @@ export async function POST(request: Request) {
     locationCode = DEFAULT_LOCATION_CODE,
     mode = "topic",
     sourceContext = [],
+    draftContext = [],
     keywords: inputKeywords = [],
     limit = 50,
     save = false,
@@ -162,6 +172,7 @@ export async function POST(request: Request) {
     locationCode?: number;
     mode?: "topic" | "ideas" | "related" | "metrics";
     sourceContext?: string[];
+    draftContext?: string[];
     keywords?: string[];
     limit?: number;
     save?: boolean;
@@ -185,7 +196,7 @@ export async function POST(request: Request) {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      let queries = await expandTopicToQueries(seed!, sourceContext);
+      let queries = await expandTopicToQueries(seed!, sourceContext, draftContext);
 
       if (queries.length === 0) {
         const fallback = deriveShortSeed(seed!);
@@ -198,7 +209,6 @@ export async function POST(request: Request) {
       const queryTokens = buildQueryTokens(queries);
       console.log("[keywords/research] Relevance tokens:", Array.from(queryTokens));
 
-      // Fetch more per query since relevance filtering will trim the pool
       const perQueryLimit = Math.max(30, Math.ceil(limit / queries.length) + 15);
       const perQuery = await Promise.all(
         queries.map((q) =>

@@ -68,6 +68,11 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [duplicateMatches, setDuplicateMatches] = useState<{ title: string; slug: string; score: number }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Draft outline state
+  const [outline, setOutline] = useState<string[]>([]);
+  const [fetchingOutline, setFetchingOutline] = useState(false);
+  const [outlineError, setOutlineError] = useState<string | null>(null);
+
   // DataForSEO keyword research state
   const [dfsKeywords, setDfsKeywords] = useState<DFSKeyword[]>([]);
   const [dfsSelected, setDfsSelected] = useState<Set<string>>(new Set());
@@ -95,6 +100,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
       }
       setPrimaryKeyword(data.topic);
       setTopicRationale(data.rationale ?? null);
+      setOutline([]);
     } catch {
       setTopicError("Could not suggest a topic");
     } finally {
@@ -129,10 +135,46 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     );
   }
 
-  // Fetch keyword ideas from DataForSEO, optionally with source titles as context.
-  // When called after fetching sources, pass those titles so Claude generates
-  // better, more targeted search queries.
-  async function fetchDFSKeywords(sourceTitles: string[] = []) {
+  // Generate a quick outline (H2 headings) from the topic.
+  // This gives keyword research much richer context than the topic title alone.
+  async function fetchOutline(topic: string = primaryKeyword): Promise<string[]> {
+    if (!topic) return [];
+    setOutlineError(null);
+    setFetchingOutline(true);
+    setOutline([]);
+    try {
+      const res = await fetch("/api/generate/outline", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setOutlineError(data.error ?? "Could not generate outline");
+        return [];
+      }
+      const headings: string[] = data.headings ?? [];
+      setOutline(headings);
+      return headings;
+    } catch {
+      setOutlineError("Could not generate outline");
+      return [];
+    } finally {
+      setFetchingOutline(false);
+    }
+  }
+
+  // Draft outline → then auto-run keyword research using those headings.
+  async function handleDraftAndResearch() {
+    if (!primaryKeyword || !clusterId) return;
+    const headings = await fetchOutline(primaryKeyword);
+    await fetchDFSKeywords([], headings);
+  }
+
+  // Fetch keyword ideas from DataForSEO.
+  // sourceTitles: titles of fetched sources (optional, adds more context)
+  // draftHeadings: H2 headings from the outline draft (primary context signal)
+  async function fetchDFSKeywords(sourceTitles: string[] = [], draftHeadings: string[] = []) {
     if (!primaryKeyword || !clusterId) return;
     setDfsError(null);
     setFetchingDFS(true);
@@ -150,6 +192,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           limit: 30,
           save: true,
           sourceContext: sourceTitles,
+          draftContext: draftHeadings.length > 0 ? draftHeadings : outline,
         }),
       });
       const data = await res.json();
@@ -231,11 +274,10 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           .join("\n")
       );
 
-      // Auto-run keyword research using the source titles as context.
-      // This gives Claude real signals about what the topic covers,
-      // producing much better search query seeds for DataForSEO.
+      // After sources load, re-run keyword research with both source titles
+      // and any existing outline headings for maximum context.
       const sourceTitles = sources.map((s) => s.title).filter(Boolean);
-      fetchDFSKeywords(sourceTitles);
+      fetchDFSKeywords(sourceTitles, outline);
     } catch {
       setSourcesError("Could not fetch sources");
     } finally {
@@ -296,7 +338,10 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
                   <button
                     key={k.id}
                     type="button"
-                    onClick={() => setPrimaryKeyword(k.keyword)}
+                    onClick={() => {
+                      setPrimaryKeyword(k.keyword);
+                      setOutline([]);
+                    }}
                     className={`rounded-full border px-2.5 py-1 text-xs ${
                       primaryKeyword === k.keyword
                         ? "border-atlasteal bg-atlasteal/10 text-atlasteal font-semibold"
@@ -330,6 +375,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             onChange={(e) => {
               setPrimaryKeyword(e.target.value);
               setTopicRationale(null);
+              setOutline([]);
               setDfsOpen(false);
               setDfsKeywords([]);
             }}
@@ -344,6 +390,48 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           </p>
         </div>
 
+        {/* Step 1: Draft outline — generates H2 headings to give KW research real context */}
+        <div>
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-atlasnavy">
+              Step 1 — Draft outline
+            </label>
+            <button
+              type="button"
+              onClick={handleDraftAndResearch}
+              disabled={fetchingOutline || fetchingDFS || !primaryKeyword}
+              title="Generate section headings for this topic, then use them to find targeted keywords"
+              className="shrink-0 rounded-md border border-atlasteal px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50"
+            >
+              {fetchingOutline
+                ? "Drafting outline…"
+                : fetchingDFS
+                ? "Researching keywords…"
+                : outline.length > 0
+                ? "Re-draft outline + keywords"
+                : "Draft outline + find keywords"}
+            </button>
+          </div>
+
+          {outlineError && <p className="mt-1 text-xs text-red-600">{outlineError}</p>}
+
+          {outline.length > 0 && (
+            <div className="mt-2 rounded-md border border-atlasnavy/10 bg-atlasnavy/[0.02] px-3 py-2">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-atlasnavy/40">
+                Article sections
+              </p>
+              <ol className="space-y-0.5">
+                {outline.map((h, i) => (
+                  <li key={i} className="text-xs text-atlasnavy/70">
+                    {i + 1}. {h}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </div>
+
+        {/* Step 2: Supporting keywords (populated by DataForSEO after outline) */}
         <div>
           <div className="flex items-center justify-between">
             <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (comma separated)</label>
@@ -359,12 +447,12 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
               </button>
               <button
                 type="button"
-                onClick={() => fetchDFSKeywords(fetchedSources.map((s) => s.title).filter(Boolean))}
+                onClick={() => fetchDFSKeywords(fetchedSources.map((s) => s.title).filter(Boolean), outline)}
                 disabled={!primaryKeyword || fetchingDFS}
-                title="Refresh keyword research (uses fetched sources for better results)"
+                title="Refresh keyword research"
                 className="shrink-0 rounded-md border border-atlasteal/60 px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50"
               >
-                {fetchingDFS ? "Researching…" : "From DataForSEO"}
+                {fetchingDFS ? "Researching…" : "Refresh keywords"}
               </button>
             </div>
           </div>
@@ -378,7 +466,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
 
           {dfsOpen && fetchingDFS && (
             <p className="mt-1 text-xs text-atlasnavy/50">
-              {fetchedSources.length > 0
+              {outline.length > 0
+                ? "Finding keywords based on your outline…"
+                : fetchedSources.length > 0
                 ? "Finding keywords based on your sources…"
                 : "Identifying subtopics and fetching keyword data…"}
             </p>
@@ -458,6 +548,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           )}
         </div>
 
+        {/* Step 3: Sources */}
         <div>
           <div className="flex items-center justify-between">
             <label className="block text-sm font-medium text-atlasnavy">
