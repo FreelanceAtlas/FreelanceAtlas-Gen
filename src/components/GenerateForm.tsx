@@ -131,6 +131,21 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     );
   }
 
+  // Derive a short, clean seed keyword from an article title so DataForSEO
+  // can find ideas. Strips parentheticals, leading question words, and caps
+  // at 5 words — e.g. "How to Create a Freelance Business Name (With 50+ Ideas)"
+  // becomes "freelance business name".
+  function deriveSearchSeed(title: string): string {
+    return title
+      .replace(/\s*\([^)]*\)/g, "")           // strip parentheticals
+      .replace(/^(how to|what is|why|when|where|who|which|best way to|guide to)\s+/i, "")
+      .trim()
+      .split(/\s+/)
+      .slice(0, 5)
+      .join(" ")
+      .toLowerCase();
+  }
+
   // Fetch keyword ideas from DataForSEO using the primary keyword as seed.
   // Results are saved to the keywords table (save: true) so they populate
   // the cluster bank too, and shown as selectable pills below the field.
@@ -141,12 +156,13 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     setDfsOpen(true);
     setDfsKeywords([]);
     setDfsSelected(new Set());
+    const seed = deriveSearchSeed(primaryKeyword);
     try {
       const res = await fetch("/api/keywords/research", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          seed: primaryKeyword,
+          seed,
           clusterId,
           mode: "ideas",
           limit: 20,
@@ -333,7 +349,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
           {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
           <p className="mt-1 text-xs text-atlasnavy/40">
-            Pick a topic from the bank above, hit “Suggest a topic” for a fresh AI-generated angle, or
+            Pick a topic from the bank above, hit "Suggest a topic" for a fresh AI-generated angle, or
             just type your own.
           </p>
         </div>
@@ -509,24 +525,4 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
               {duplicateMatches.map((m) => (
                 <li key={m.slug}>{m.title} ({Math.round(m.score * 100)}% overlap)</li>
               ))}
-            </ul>
-            <button
-              onClick={() => submit(true)}
-              className="mt-2 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white"
-            >
-              Generate anyway (new angle)
-            </button>
-          </div>
-        )}
-
-        <button
-          disabled={loading || !primaryKeyword}
-          onClick={() => submit(false)}
-          className="rounded-md bg-atlasteal px-4 py-2 text-sm font-semibold text-white hover:bg-atlasteal/90 disabled:opacity-50"
-        >
-          {loading ? "Generating…" : "Generate publish-ready post"}
-        </button>
-      </div>
-    </div>
-  );
-}
+            <
