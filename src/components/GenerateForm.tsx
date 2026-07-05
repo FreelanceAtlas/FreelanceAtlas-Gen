@@ -19,8 +19,6 @@ interface DFSKeyword {
   cpc: number | null;
 }
 
-// Stopwords + short tokens are excluded so relevance matching isn't fooled by
-// generic filler words ("best", "for", "how") that appear in almost every topic.
 const STOPWORDS = new Set([
   "the", "for", "and", "with", "that", "this", "from", "your", "best", "top",
   "how", "what", "are", "you", "can", "vs", "a", "an", "to", "of", "in", "on",
@@ -76,7 +74,6 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [fetchingDFS, setFetchingDFS] = useState(false);
   const [dfsError, setDfsError] = useState<string | null>(null);
   const [dfsOpen, setDfsOpen] = useState(false);
-  const [dfsSeed, setDfsSeed] = useState<string | null>(null);
 
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
   const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
@@ -132,46 +129,8 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     );
   }
 
-  // Derive a short, clean seed keyword from an article title so DataForSEO
-  // can find intent-matched ideas. Strategy:
-  //   1. Strip parentheticals
-  //   2. Strip leading question phrase ("How to", "What is", etc.)
-  //   3. Strip the leading action verb + any following article
-  //   4. Stop at relative-clause connectors ("that", "for", "with", etc.)
-  //   5. Take first 4 words of the remaining noun phrase
-  //
-  // "How to Write a Freelance Scope of Work That Prevents Scope Creep (Template)"
-  //   → "freelance scope of work"
-  // "How to Brand Your Freelance Business"
-  //   → "freelance business"
-  function deriveSearchSeed(title: string): string {
-    // 1. Strip parentheticals
-    let s = title.replace(/\s*\([^)]*\)/g, "").trim();
-
-    // 2. Strip leading question phrases
-    s = s.replace(/^(how to|what is|why|when|where|who|which|best way to|guide to)\s+/i, "").trim();
-
-    // 3. Strip the leading action verb + optional article
-    const parts = s.split(/\s+/);
-    if (parts.length > 3) {
-      const withoutVerb = parts.slice(1).join(" ");
-      s = withoutVerb.replace(/^(a |an |the |your |my )/i, "").trim();
-    }
-
-    // 4. Stop at relative-clause / conjunction markers
-    const STOP = /^(that|which|who|when|where|for|with|and|or|in|is|are|vs)$/i;
-    const words = s.split(/\s+/);
-    const stopIdx = words.findIndex((w) => STOP.test(w));
-    const core = stopIdx > 0 ? words.slice(0, stopIdx) : words.slice(0, 4);
-    const result = core.join(" ").toLowerCase().trim();
-
-    // Fallback: use first 4 words of cleaned title if derivation returns empty
-    return result || title.replace(/\s*\([^)]*\)/g, "").toLowerCase().split(/\s+/).slice(0, 4).join(" ");
-  }
-
-  // Fetch keyword ideas from DataForSEO using the primary keyword as seed.
-  // Results are saved to the keywords table (save: true) so they populate
-  // the cluster bank too, and shown as selectable pills below the field.
+  // Fetch keywords by expanding the topic into subtopics via Claude,
+  // then running DataForSEO keyword_ideas for each subtopic.
   async function fetchDFSKeywords() {
     if (!primaryKeyword || !clusterId) return;
     setDfsError(null);
@@ -179,32 +138,30 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     setDfsOpen(true);
     setDfsKeywords([]);
     setDfsSelected(new Set());
-    const seed = deriveSearchSeed(primaryKeyword);
-    setDfsSeed(seed);
     try {
       const res = await fetch("/api/keywords/research", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          seed,
+          seed: primaryKeyword,   // full topic — Claude expands to subtopics server-side
           clusterId,
-          mode: "related",   // semantic intent, not just exact variants
-          limit: 20,
+          mode: "topic",
+          limit: 30,
           save: true,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setDfsError(data.error ?? "DataForSEO lookup failed");
+        setDfsError(data.error ?? "Keyword research failed");
         return;
       }
       const results: DFSKeyword[] = (data.results ?? [])
         .filter((r: DFSKeyword) => r.keyword && r.keyword.toLowerCase() !== primaryKeyword.toLowerCase())
-        .slice(0, 20);
+        .slice(0, 30);
       setDfsKeywords(results);
     } catch (err) {
-      console.error("DataForSEO fetch error:", err);
-      setDfsError("DataForSEO lookup failed");
+      console.error("Keyword research error:", err);
+      setDfsError("Keyword research failed");
     } finally {
       setFetchingDFS(false);
     }
@@ -396,10 +353,10 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
                 type="button"
                 onClick={fetchDFSKeywords}
                 disabled={!primaryKeyword || fetchingDFS}
-                title="Fetch real keyword ideas from DataForSEO based on your primary keyword"
+                title="Claude maps your topic to subtopics, then fetches real keyword data from DataForSEO for each"
                 className="shrink-0 rounded-md border border-atlasteal/60 px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50"
               >
-                {fetchingDFS ? "Fetching…" : "From DataForSEO"}
+                {fetchingDFS ? "Researching…" : "From DataForSEO"}
               </button>
             </div>
           </div>
@@ -411,12 +368,18 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           {suggestionMessage && <p className="mt-1 text-xs text-atlasnavy/50">{suggestionMessage}</p>}
           {dfsError && <p className="mt-1 text-xs text-red-600">{dfsError}</p>}
 
+          {dfsOpen && fetchingDFS && (
+            <p className="mt-1 text-xs text-atlasnavy/50">
+              Identifying subtopics and fetching keyword data…
+            </p>
+          )}
+
           {/* DataForSEO keyword picker */}
           {dfsOpen && dfsKeywords.length > 0 && (
             <div className="mt-2 rounded-md border border-atlasteal/30 bg-atlasteal/5 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-semibold text-atlasnavy">
-                  Related keywords for <span className="text-atlasteal">&ldquo;{dfsSeed}&rdquo;</span> — click to select:
+                  {dfsKeywords.length} keywords found — click to select:
                 </p>
                 <button
                   type="button"
@@ -478,14 +441,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
               </div>
             </div>
           )}
-          {dfsOpen && fetchingDFS && dfsSeed && (
-            <p className="mt-1 text-xs text-atlasnavy/50">
-              Searching DataForSEO for <span className="font-medium text-atlasteal">&ldquo;{dfsSeed}&rdquo;</span>…
-            </p>
-          )}
           {dfsOpen && !fetchingDFS && dfsKeywords.length === 0 && !dfsError && (
             <p className="mt-1 text-xs text-atlasnavy/50">
-              No results for{dfsSeed ? <> <span className="font-medium text-atlasteal">&ldquo;{dfsSeed}&rdquo;</span></> : ""} — try editing the topic and searching again.
+              No keywords found for this topic — try rephrasing it.
             </p>
           )}
         </div>
