@@ -349,7 +349,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
           {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
           <p className="mt-1 text-xs text-atlasnavy/40">
-            Pick a topic from the bank above, hit "Suggest a topic" for a fresh AI-generated angle, or
+            Pick a topic from the bank above, hit “Suggest a topic” for a fresh AI-generated angle, or
             just type your own.
           </p>
         </div>
@@ -525,4 +525,24 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
               {duplicateMatches.map((m) => (
                 <li key={m.slug}>{m.title} ({Math.round(m.score * 100)}% overlap)</li>
               ))}
-            <
+            </ul>
+            <button
+              onClick={() => submit(true)}
+              className="mt-2 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white"
+            >
+              Generate anyway (new angle)
+            </button>
+          </div>
+        )}
+
+        <button
+          disabled={loading || !primaryKeyword}
+          onClick={() => submit(false)}
+          className="rounded-md bg-atlasteal px-4 py-2 text-sm font-semibold text-white hover:bg-atlasteal/90 disabled:opacity-50"
+        >
+          {loading ? "Generating…" : "Generate publish-ready post"}
+        </button>
+      </div>
+    </div>
+  );
+}
