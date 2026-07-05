@@ -129,9 +129,10 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     );
   }
 
-  // Fetch keywords by expanding the topic into subtopics via Claude,
-  // then running DataForSEO keyword_ideas for each subtopic.
-  async function fetchDFSKeywords() {
+  // Fetch keyword ideas from DataForSEO, optionally with source titles as context.
+  // When called after fetching sources, pass those titles so Claude generates
+  // better, more targeted search queries.
+  async function fetchDFSKeywords(sourceTitles: string[] = []) {
     if (!primaryKeyword || !clusterId) return;
     setDfsError(null);
     setFetchingDFS(true);
@@ -143,11 +144,12 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          seed: primaryKeyword,   // full topic — Claude expands to subtopics server-side
+          seed: primaryKeyword,
           clusterId,
           mode: "topic",
           limit: 30,
           save: true,
+          sourceContext: sourceTitles,
         }),
       });
       const data = await res.json();
@@ -228,6 +230,12 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           .map((s) => `${s.url} | ${s.title}${s.publishedDate ? ` | ${s.publishedDate}` : ""}`)
           .join("\n")
       );
+
+      // Auto-run keyword research using the source titles as context.
+      // This gives Claude real signals about what the topic covers,
+      // producing much better search query seeds for DataForSEO.
+      const sourceTitles = sources.map((s) => s.title).filter(Boolean);
+      fetchDFSKeywords(sourceTitles);
     } catch {
       setSourcesError("Could not fetch sources");
     } finally {
@@ -331,7 +339,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
           {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
           <p className="mt-1 text-xs text-atlasnavy/40">
-            Pick a topic from the bank above, hit “Suggest a topic” for a fresh AI-generated angle, or
+            Pick a topic from the bank above, hit "Suggest a topic" for a fresh AI-generated angle, or
             just type your own.
           </p>
         </div>
@@ -351,9 +359,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
               </button>
               <button
                 type="button"
-                onClick={fetchDFSKeywords}
+                onClick={() => fetchDFSKeywords(fetchedSources.map((s) => s.title).filter(Boolean))}
                 disabled={!primaryKeyword || fetchingDFS}
-                title="Claude maps your topic to subtopics, then fetches real keyword data from DataForSEO for each"
+                title="Refresh keyword research (uses fetched sources for better results)"
                 className="shrink-0 rounded-md border border-atlasteal/60 px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50"
               >
                 {fetchingDFS ? "Researching…" : "From DataForSEO"}
@@ -370,7 +378,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
 
           {dfsOpen && fetchingDFS && (
             <p className="mt-1 text-xs text-atlasnavy/50">
-              Identifying subtopics and fetching keyword data…
+              {fetchedSources.length > 0
+                ? "Finding keywords based on your sources…"
+                : "Identifying subtopics and fetching keyword data…"}
             </p>
           )}
 

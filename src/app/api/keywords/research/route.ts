@@ -1,13 +1,14 @@
 // POST /api/keywords/research
 //
 // Body:
-//   seed         string   — the full article topic
-//   clusterId    string   — which cluster to save keywords under
-//   locationCode number?  — DataForSEO location code (default 2840 = US)
-//   mode         string?  — "topic" (default) | "ideas" | "related" | "metrics"
-//   keywords     string[] — required when mode="metrics"
-//   limit        number?  — max results to return (default 50)
-//   save         boolean? — if true, upsert results into the keywords table
+//   seed          string    — the full article topic
+//   clusterId     string    — which cluster to save keywords under
+//   locationCode  number?   — DataForSEO location code (default 2840 = US)
+//   mode          string?   — "topic" (default) | "ideas" | "related" | "metrics"
+//   sourceContext string[]? — source titles fetched for this topic (improves Claude query generation)
+//   keywords      string[]  — required when mode="metrics"
+//   limit         number?   — max results to return (default 50)
+//   save          boolean?  — if true, upsert results into the keywords table
 
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
@@ -22,12 +23,11 @@ import {
 export const maxDuration = 60;
 
 // Derive a short fallback seed from a long article title.
-// Strips leading question words, parentheticals, and caps at 4 words.
 function deriveShortSeed(topic: string): string {
   return topic
-    .replace(/\(.*?\)/g, "")           // remove (parentheticals)
+    .replace(/\(.*?\)/g, "")
     .replace(/^(how to|what is|why|when|where|who|which|can you)\s+/i, "")
-    .replace(/\bthat\b.*/i, "")        // stop at relative clauses
+    .replace(/\bthat\b.*/i, "")
     .trim()
     .split(/\s+/)
     .slice(0, 4)
@@ -35,12 +35,29 @@ function deriveShortSeed(topic: string): string {
     .toLowerCase();
 }
 
-async function expandTopicToQueries(topic: string): Promise<string[]> {
+async function expandTopicToQueries(
+  topic: string,
+  sourceContext: string[] = []
+): Promise<string[]> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("[keywords/research] ANTHROPIC_API_KEY not set");
     return [];
   }
+
+  const sourceBlock =
+    sourceContext.length > 0
+      ? `\nRelated articles found online about this topic:\n${sourceContext
+          .slice(0, 8)
+          .map((t) => `- ${t}`)
+          .join("\n")}\n`
+      : "";
+
+  const prompt =
+    `Article topic: "${topic}"${sourceBlock}\n\n` +
+    `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
+    `Each query should cover a distinct angle or subtopic. ` +
+    `Return only the queries, one per line, no numbering, no explanation.`;
 
   let data: Record<string, unknown>;
   try {
@@ -54,14 +71,7 @@ async function expandTopicToQueries(topic: string): Promise<string[]> {
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 150,
-        messages: [{
-          role: "user",
-          content:
-            `Article topic: "${topic}"\n\n` +
-            `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
-            `Each query should cover a distinct angle or subtopic. ` +
-            `Return only the queries, one per line, no numbering, no explanation.`,
-        }],
+        messages: [{ role: "user", content: prompt }],
       }),
     });
 
@@ -104,6 +114,7 @@ export async function POST(request: Request) {
     clusterId,
     locationCode = DEFAULT_LOCATION_CODE,
     mode = "topic",
+    sourceContext = [],
     keywords: inputKeywords = [],
     limit = 50,
     save = false,
@@ -112,6 +123,7 @@ export async function POST(request: Request) {
     clusterId: string;
     locationCode?: number;
     mode?: "topic" | "ideas" | "related" | "metrics";
+    sourceContext?: string[];
     keywords?: string[];
     limit?: number;
     save?: boolean;
@@ -135,8 +147,9 @@ export async function POST(request: Request) {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      // Step 1: Claude generates 5 focused search queries from the topic
-      let queries = await expandTopicToQueries(seed!);
+      // Step 1: Claude expands topic → 5 focused search queries
+      // Source titles from the UI give Claude real context about the topic.
+      let queries = await expandTopicToQueries(seed!, sourceContext);
 
       // Fallback: if Claude returned nothing, derive a short seed manually
       if (queries.length === 0) {
@@ -146,7 +159,7 @@ export async function POST(request: Request) {
       }
 
       debugQueries = queries;
-      console.log("[keywords/research] Fetching keyword_ideas for queries:", queries);
+      console.log("[keywords/research] Fetching keyword_ideas for:", queries);
 
       // Step 2: keyword_ideas for each query in parallel
       const perQueryLimit = Math.max(12, Math.ceil(limit / queries.length) + 5);
