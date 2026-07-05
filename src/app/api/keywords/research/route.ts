@@ -19,17 +19,18 @@ function deriveShortSeed(topic: string): string {
     .replace(/\bthat\b.*/i, "")
     .trim()
     .split(/\s+/)
-    .slice(0, 4)
+    .slice(0, 3)
     .join(" ")
     .toLowerCase();
 }
 
-// Ask Claude Haiku to generate 5 specific Google search queries for this topic.
-// draftHeadings and sourceContext give it extra signal about what the article covers.
-async function expandTopicToQueries(
+// Ask Claude Haiku to generate 5 SHORT key phrases (2-3 words) for this topic.
+// These go directly into DataForSEO related_keywords — short clean noun phrases
+// stay semantically close; longer queries with verbs/qualifiers cause drift.
+async function expandTopicToSeeds(
   topic: string,
-  sourceContext: string[] = [],
-  draftHeadings: string[] = []
+  draftHeadings: string[] = [],
+  sourceContext: string[] = []
 ): Promise<string[]> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -39,26 +40,21 @@ async function expandTopicToQueries(
 
   const headingsBlock =
     draftHeadings.length > 0
-      ? `\nThe article will cover these sections:\n${draftHeadings
-          .slice(0, 8)
-          .map((h) => `- ${h}`)
-          .join("\n")}\n`
+      ? `\nArticle sections:\n${draftHeadings.slice(0, 6).map((h) => `- ${h}`).join("\n")}\n`
       : "";
 
   const sourceBlock =
     sourceContext.length > 0
-      ? `\nRelated articles found online:\n${sourceContext
-          .slice(0, 6)
-          .map((t) => `- ${t}`)
-          .join("\n")}\n`
+      ? `\nRelated articles:\n${sourceContext.slice(0, 4).map((t) => `- ${t}`).join("\n")}\n`
       : "";
 
   const prompt =
-    `Article topic: "${topic}"${headingsBlock}${sourceBlock}\n` +
-    `List exactly 5 specific Google search queries (2-4 words each) a person would type to research this topic. ` +
-    `Use concrete subject-matter terms — avoid vague words like "search", "check", "ideas", "tips", "guide", "examples", "template", "free", "best", "names", "brand", "media", "legal", "management", "language". ` +
-    `Each query should target a distinct, specific angle. ` +
-    `Return only the queries, one per line, no numbering, no explanation.`;
+    `Topic: "${topic}"${headingsBlock}${sourceBlock}\n` +
+    `List exactly 5 short keyword phrases (2-3 words each) that directly name the core concepts in this topic. ` +
+    `These will be used as seeds for a keyword research tool, so they must be clean noun phrases — ` +
+    `NO verbs, NO qualifiers like "how to", "definition", "strategy", "guide", "tips", "examples", "process". ` +
+    `Just the core subject-matter nouns. Each phrase should target a different concept. ` +
+    `Return only the phrases, one per line, no numbering.`;
 
   let data: Record<string, unknown>;
   try {
@@ -71,12 +67,12 @@ async function expandTopicToQueries(
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 150,
+        max_tokens: 100,
         messages: [{ role: "user", content: prompt }],
       }),
     });
     if (!res.ok) {
-      console.error(`[keywords/research] Claude query-gen error ${res.status}`);
+      console.error(`[keywords/research] Claude seed-gen error ${res.status}`);
       return [];
     }
     data = await res.json();
@@ -89,18 +85,21 @@ async function expandTopicToQueries(
   if (!content || content[0]?.type !== "text") return [];
 
   const text = content[0].text ?? "";
-  console.log("[keywords/research] Claude queries:", text);
+  console.log("[keywords/research] Claude seeds:", text);
 
   return text
     .split("\n")
     .map((s) => s.trim().replace(/^[-\d\.\)\*\"]+\s*/, "").replace(/\"$/, "").toLowerCase())
-    .filter((s) => s.length > 3 && s.split(/\s+/).length >= 2)
+    .filter((s) => {
+      const words = s.split(/\s+/);
+      return s.length > 3 && words.length >= 2 && words.length <= 4;
+    })
     .slice(0, 5);
 }
 
-// Ask Claude Haiku to filter a list of keyword candidates down to those
-// genuinely relevant to the topic and outline. Semantic understanding beats
-// token matching — any word can be generic or specific depending on context.
+// Claude Haiku post-filter: given a pool of keyword candidates and the topic,
+// return only those that are genuinely relevant. Semantic understanding beats
+// token matching — handles any word being generic or specific depending on context.
 async function semanticFilter(
   candidates: KeywordMetrics[],
   topic: string,
@@ -110,13 +109,9 @@ async function semanticFilter(
   if (candidates.length === 0) return [];
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    // Fallback: return as-is if no key
-    return candidates.slice(0, limit);
-  }
+  if (!apiKey) return candidates.slice(0, limit);
 
-  // Only send the top 60 by volume — Haiku context is cheap but keep prompt tight
-  const pool = candidates.slice(0, 60);
+  const pool = candidates.slice(0, 80);
   const kwList = pool.map((k) => k.keyword).join("\n");
 
   const headingsBlock =
@@ -126,11 +121,10 @@ async function semanticFilter(
 
   const prompt =
     `Topic: "${topic}"\n${headingsBlock}` +
-    `Below are keyword candidates from a keyword research tool. ` +
-    `Return ONLY the keywords that are genuinely relevant to this specific topic — ` +
+    `Below are keyword candidates. Return ONLY those genuinely relevant to this specific topic — ` +
     `meaning someone searching that keyword is likely interested in content about this exact topic. ` +
     `Exclude generic, unrelated, or only loosely connected keywords. ` +
-    `Return just the relevant keywords, one per line, nothing else.\n\n${kwList}`;
+    `Return just the relevant keywords, one per line, exactly as written.\n\n${kwList}`;
 
   let data: Record<string, unknown>;
   try {
@@ -143,7 +137,7 @@ async function semanticFilter(
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 400,
+        max_tokens: 600,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -162,17 +156,20 @@ async function semanticFilter(
 
   const returned = (content[0].text ?? "")
     .split("\n")
-    .map((s) => s.trim().toLowerCase().replace(/^[-\*]\s*/, ""))
-    .filter((s) => s.length > 0);
+    .map((s) => s.trim().toLowerCase().replace(/^[-\*\d\.\)]+\s*/, ""))
+    .filter((s) => s.length > 0 && s.split(" ").length <= 6);
 
-  console.log("[keywords/research] Claude kept:", returned);
+  console.log(`[keywords/research] Claude kept ${returned.length} of ${pool.length}`);
 
-  // Preserve original KeywordMetrics objects (with volume/difficulty) by matching
-  // on lowercase keyword string. Maintain volume-sorted order from pool.
   const keepSet = new Set(returned);
   const filtered = pool.filter((k) => keepSet.has(k.keyword.toLowerCase()));
 
-  console.log(`[keywords/research] Semantic filter: ${pool.length} -> ${filtered.length}`);
+  // If Claude filtered everything (over-strict), fall back to top candidates
+  if (filtered.length === 0) {
+    console.warn("[keywords/research] Semantic filter returned 0 — falling back to top candidates");
+    return candidates.slice(0, limit);
+  }
+
   return filtered.slice(0, limit);
 }
 
@@ -213,35 +210,41 @@ export async function POST(request: Request) {
   }
 
   let results: KeywordMetrics[];
-  let debugQueries: string[] = [];
+  let debugSeeds: string[] = [];
 
   try {
     if (mode === "metrics") {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      // 1. Generate seed queries
-      let queries = await expandTopicToQueries(seed!, sourceContext, draftContext);
-      if (queries.length === 0) {
+      // 1. Claude generates short noun-phrase seeds
+      let seeds = await expandTopicToSeeds(seed!, draftContext, sourceContext);
+      if (seeds.length === 0) {
         const fallback = deriveShortSeed(seed!);
         console.log("[keywords/research] Falling back to:", fallback);
-        queries = [fallback];
+        seeds = [fallback];
       }
-      debugQueries = queries;
+      debugSeeds = seeds;
+      console.log("[keywords/research] Seeds:", seeds);
 
-      // 2. Fetch keyword ideas for each seed in parallel
-      const perQueryLimit = 30;
-      const perQuery = await Promise.all(
-        queries.map((q) =>
-          getKeywordIdeas(q, { locationCode, limit: perQueryLimit })
-            .then((r) => { console.log(`[keywords/research] "${q}" -> ${r.length}`); return r; })
-            .catch((e) => { console.error(`keyword_ideas failed for "${q}":`, e); return [] as KeywordMetrics[]; })
+      // 2. Use related_keywords for each seed — stays semantically close,
+      //    unlike keyword_ideas which can drift badly on multi-word seeds
+      const perSeedLimit = 25;
+      const perSeed = await Promise.all(
+        seeds.map((s) =>
+          getRelatedKeywords(s, { locationCode, limit: perSeedLimit })
+            .then((r) => { console.log(`[keywords/research] related "${s}" -> ${r.length}`); return r; })
+            .catch((e) => {
+              console.error(`related_keywords failed for "${s}":`, e);
+              // fallback to keyword_ideas if related_keywords errors
+              return getKeywordIdeas(s, { locationCode, limit: perSeedLimit }).catch(() => [] as KeywordMetrics[]);
+            })
         )
       );
 
-      // 3. Deduplicate and sort by volume before sending to Claude filter
+      // 3. Deduplicate, sort by volume
       const seen = new Set<string>();
-      const deduped = perQuery
+      const deduped = perSeed
         .flat()
         .filter((k) => {
           const key = k.keyword.toLowerCase();
@@ -276,7 +279,7 @@ export async function POST(request: Request) {
       cluster_id: clusterId,
       keyword: kw.keyword,
       search_intent: kw.search_intent ?? "informational",
-      research_source: `DataForSEO/${mode} — ${seed ?? "bulk"}`,
+      research_source: `DataForSEO/related — ${seed ?? "bulk"}`,
       volume: kw.volume,
       difficulty: kw.difficulty,
       cpc: kw.cpc,
@@ -304,11 +307,11 @@ export async function POST(request: Request) {
 
     if (upsertError) {
       return NextResponse.json(
-        { results, queries: debugQueries, saveError: upsertError.message },
+        { results, seeds: debugSeeds, saveError: upsertError.message },
         { status: 200 }
       );
     }
   }
 
-  return NextResponse.json({ results, queries: debugQueries, saved: save && results.length > 0 });
+  return NextResponse.json({ results, seeds: debugSeeds, saved: save && results.length > 0 });
 }
