@@ -11,7 +11,8 @@ export default function Sidebar() {
           <Link href="/dashboard" className="rounded-md px-3 py-2 hover:bg-atlassand">Overview</Link>
           <Link href="/dashboard/generate" className="rounded-md px-3 py-2 hover:bg-atlassand">Generate post</Link>
           <Link href="/dashboard/articles" className="rounded-md px-3 py-2 hover:bg-atlassand">Articles</Link>
-          <Link href="/dashboard/clusters" className="rounded-md px-3 py-2 hover:bg-atlassand">Clusters & keywords</Link>
+          <Link href="/dashboard/clusters" className="rounded-md px-3 py-2 hover:bg-atlassand">Clusters &amp; keywords</Link>
+          <Link href="/dashboard/keyword-research" className="rounded-md px-3 py-2 hover:bg-atlassand">Keyword research</Link>
           <Link href="/dashboard/affiliate-links" className="rounded-md px-3 py-2 hover:bg-atlassand">Affiliate links</Link>
         </nav>
       </div>
