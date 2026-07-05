@@ -1,17 +1,11 @@
 // POST /api/keywords/research
 //
-// Calls DataForSEO to find keyword ideas for a seed term, returns them with
-// full metrics (volume, difficulty, CPC, competition, monthly trend), and
-// optionally bulk-saves them into the keywords table so they're immediately
-// available as supporting keywords for article generation.
-//
 // Body:
 //   seed         string   — the topic / seed keyword
 //   clusterId    string   — which cluster to save keywords under
 //   locationCode number?  — DataForSEO location code (default 2840 = US)
 //   mode         string?  — "topic" (default) | "ideas" | "related" | "metrics"
-//                           topic   → Claude expands topic into subtopics,
-//                                     then keyword_ideas for each (richest)
+//                           topic   → related_keywords(seed) → keyword_ideas per subtopic
 //                           ideas   → keyword_ideas for the seed directly
 //                           related → related_keywords for the seed
 //                           metrics → search_volume for an existing list
@@ -20,7 +14,6 @@
 //   save         boolean? — if true, upsert results into the keywords table
 
 import { NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@/lib/supabase/server";
 import {
   getKeywordIdeas,
@@ -31,36 +24,6 @@ import {
 } from "@/lib/dataforseo";
 
 export const maxDuration = 60;
-
-// --- Step 1: Use Claude to expand the article topic into subtopic seeds ----
-// Given a topic like "How to Create a Freelance Business Name", returns
-// specific 2-4 word phrases like ["freelance business name", "business naming
-// strategy", "freelance branding tips", ...] that each work as DataForSEO seeds.
-async function expandTopicToSubtopics(topic: string): Promise<string[]> {
-  const client = new Anthropic();
-
-  const msg = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 200,
-    messages: [
-      {
-        role: "user",
-        content:
-          `Article topic: "${topic}"\n\n` +
-          `List 5 specific subtopic keyword phrases (2-4 words each) that cover the main aspects someone reading this article would search for. ` +
-          `Each phrase should work as a standalone keyword research seed for DataForSEO. ` +
-          `Return only the phrases, one per line, no numbering or bullets.`,
-      },
-    ],
-  });
-
-  const text = msg.content[0].type === "text" ? msg.content[0].text : "";
-  return text
-    .split("\n")
-    .map((s) => s.trim().replace(/^[-\d\.\)\*]+\s*/, "").toLowerCase())
-    .filter((s) => s.length > 3 && s.split(/\s+/).length >= 2)
-    .slice(0, 6);
-}
 
 export async function POST(request: Request) {
   const supabase = createClient();
@@ -101,13 +64,18 @@ export async function POST(request: Request) {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      // Step 1: Claude expands the topic into 5-6 subtopic seeds
-      const subtopics = await expandTopicToSubtopics(seed!);
+      // Step 1: use related_keywords to discover subtopic terms for the seed
+      const subtopicItems = await getRelatedKeywords(seed!, { locationCode, limit: 10 });
 
-      // Step 2: keyword_ideas for each subtopic, in parallel
+      // Step 2: run keyword_ideas for each subtopic in parallel
+      //         fall back to keyword_ideas on the seed itself if no subtopics found
+      const subtopicSeeds = subtopicItems.length > 0
+        ? subtopicItems.map((k) => k.keyword).slice(0, 8)
+        : [seed!];
+
       const perSubtopic = await Promise.all(
-        subtopics.map((st) =>
-          getKeywordIdeas(st, { locationCode, limit: Math.ceil(limit / subtopics.length) + 5 })
+        subtopicSeeds.map((st) =>
+          getKeywordIdeas(st, { locationCode, limit: Math.ceil(limit / subtopicSeeds.length) + 5 })
         )
       );
 
