@@ -12,35 +12,52 @@ import {
 
 export const maxDuration = 60;
 
-// Stopwords excluded when building the relevance token set from Claude queries.
+// Words excluded when building relevance tokens from Claude's queries.
+// Short or generic words that appear in many unrelated keyword searches
+// must be excluded so they don't pull in off-topic results.
 const QUERY_STOPWORDS = new Set([
+  // Articles / prepositions / conjunctions
   "how", "to", "a", "an", "the", "and", "or", "of", "for", "in", "on",
   "is", "vs", "with", "that", "this", "from", "your", "what", "why",
   "when", "where", "who", "which", "can", "do", "does", "be", "are",
-  "prevent", "preventing", "define", "definition", "examples", "example",
+  // Generic verbs / nouns that appear in millions of unrelated searches
+  "work", "write", "writing", "written", "make", "get", "use", "using",
+  "create", "build", "find", "manage", "run", "set", "keep", "need",
+  // Generic document/content words
+  "template", "templates", "example", "examples", "definition", "guide",
+  "tips", "tool", "tools", "type", "types", "list", "free", "best", "top",
+  "statement", "statement", "sample", "samples",
+  // Generic business/work words too broad to be signals
+  "service", "services", "business", "study", "job", "jobs",
+  "online", "site", "page", "level", "central", "admin",
+  // Filler from academic / unrelated queries
+  "cited", "mla", "asl", "busy", "custodial", "randstad",
+  "prevent", "preventing", "define",
 ]);
 
-// Build a set of meaningful tokens across all Claude-generated queries.
-// Used to filter DataForSEO results so off-topic high-volume keywords
-// (e.g. resume templates when querying for scope-of-work templates) are dropped.
+// Minimum token length to be considered a relevance signal.
+// Short words (3-4 chars) are too generic even if not in the stopword list.
+const MIN_TOKEN_LENGTH = 5;
+
 function buildQueryTokens(queries: string[]): Set<string> {
   const tokens = new Set<string>();
   for (const q of queries) {
     q.toLowerCase()
       .split(/\s+/)
       .map((w) => w.replace(/[^a-z]/g, ""))
-      .filter((w) => w.length > 2 && !QUERY_STOPWORDS.has(w))
+      .filter((w) => w.length >= MIN_TOKEN_LENGTH && !QUERY_STOPWORDS.has(w))
       .forEach((w) => tokens.add(w));
   }
   return tokens;
 }
 
 function isTopicRelevant(keyword: string, queryTokens: Set<string>): boolean {
+  if (queryTokens.size === 0) return true; // no tokens = no filter
   const words = keyword
     .toLowerCase()
     .split(/\s+/)
     .map((w) => w.replace(/[^a-z]/g, ""));
-  return words.some((w) => w.length > 2 && queryTokens.has(w));
+  return words.some((w) => w.length >= MIN_TOKEN_LENGTH && queryTokens.has(w));
 }
 
 function deriveShortSeed(topic: string): string {
@@ -76,7 +93,7 @@ async function expandTopicToQueries(
   const prompt =
     `Article topic: "${topic}"${sourceBlock}\n\n` +
     `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
-    `Focus on the core subject — avoid generic words like "template", "examples", "definition", "free" unless the topic is specifically about those. ` +
+    `Use the core subject matter — avoid generic words like "template", "examples", "definition", "free", "tips", or "guide" unless essential. ` +
     `Each query should cover a distinct angle or subtopic. ` +
     `Return only the queries, one per line, no numbering, no explanation.`;
 
@@ -178,19 +195,16 @@ export async function POST(request: Request) {
 
       debugQueries = queries;
 
-      // Build relevance token set from the queries themselves.
-      // This lets us drop off-topic high-volume results that share only a
-      // generic word (e.g. "template") with the query but aren't actually
-      // about the topic.
       const queryTokens = buildQueryTokens(queries);
       console.log("[keywords/research] Relevance tokens:", Array.from(queryTokens));
 
-      const perQueryLimit = Math.max(20, Math.ceil(limit / queries.length) + 10);
+      // Fetch more per query since relevance filtering will trim the pool
+      const perQueryLimit = Math.max(30, Math.ceil(limit / queries.length) + 15);
       const perQuery = await Promise.all(
         queries.map((q) =>
           getKeywordIdeas(q, { locationCode, limit: perQueryLimit })
             .then((r) => {
-              console.log(`[keywords/research] "${q}" -> ${r.length} results`);
+              console.log(`[keywords/research] "${q}" -> ${r.length} raw results`);
               return r;
             })
             .catch((e) => {
@@ -204,7 +218,6 @@ export async function POST(request: Request) {
       results = perQuery
         .flat()
         .filter((k) => {
-          // Must share a meaningful token with the Claude queries
           if (!isTopicRelevant(k.keyword, queryTokens)) return false;
           const key = k.keyword.toLowerCase();
           if (seen.has(key)) return false;
@@ -214,7 +227,7 @@ export async function POST(request: Request) {
         .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
         .slice(0, limit);
 
-      console.log(`[keywords/research] Final: ${results.length} relevant keywords after dedup`);
+      console.log(`[keywords/research] Final: ${results.length} relevant keywords`);
 
     } else if (mode === "related") {
       results = await getRelatedKeywords(seed!, { locationCode, limit });
