@@ -12,6 +12,12 @@ interface FetchedSource {
   domain: string;
   authorityNote: string;
 }
+interface DFSKeyword {
+  keyword: string;
+  volume: number | null;
+  difficulty: number | null;
+  cpc: number | null;
+}
 
 // Stopwords + short tokens are excluded so relevance matching isn't fooled by
 // generic filler words ("best", "for", "how") that appear in almost every topic.
@@ -29,9 +35,6 @@ function tokenize(text: string): string[] {
     .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 }
 
-// A bank keyword is "relevant" to the chosen topic if it shares at least one
-// meaningful word with it. Deliberately conservative — if nothing overlaps,
-// it's left out rather than guessed at.
 function isRelevant(keyword: string, primaryKeyword: string): boolean {
   const kwTokens = new Set(tokenize(keyword));
   const topicTokens = new Set(tokenize(primaryKeyword));
@@ -40,6 +43,12 @@ function isRelevant(keyword: string, primaryKeyword: string): boolean {
     if (topicTokens.has(token)) return true;
   }
   return false;
+}
+
+function fmtVol(v: number | null) {
+  if (v === null) return "–";
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+  return String(v);
 }
 
 export default function GenerateForm({ clusters, keywords }: { clusters: Cluster[]; keywords: KeywordRow[] }) {
@@ -61,17 +70,16 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const [duplicateMatches, setDuplicateMatches] = useState<{ title: string; slug: string; score: number }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // The bank pills still draw from every keyword in the cluster, used or
-  // not, so a cluster that's fully used still shows its history.
+  // DataForSEO keyword research state
+  const [dfsKeywords, setDfsKeywords] = useState<DFSKeyword[]>([]);
+  const [dfsSelected, setDfsSelected] = useState<Set<string>>(new Set());
+  const [fetchingDFS, setFetchingDFS] = useState(false);
+  const [dfsError, setDfsError] = useState<string | null>(null);
+  const [dfsOpen, setDfsOpen] = useState(false);
+
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
-  // Only genuinely unused keywords are eligible to be auto-imported as
-  // supporting keywords — that feature exists specifically to recycle
-  // research that hasn't made it into an article yet.
   const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
 
-  // Asks Claude for a genuinely new topic for this cluster, checked against
-  // every keyword and title already covered, instead of just recycling
-  // whatever happens to already be sitting in the keyword bank.
   async function suggestTopic() {
     setTopicError(null);
     setTopicRationale(null);
@@ -96,9 +104,6 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     }
   }
 
-  // Pulls unused keywords from this cluster's bank into the Supporting field,
-  // but only the ones actually relevant to the chosen topic. If none qualify,
-  // nothing gets added — better an empty suggestion than a noisy one.
   function suggestSupportingKeywords() {
     setSuggestionMessage(null);
     if (!primaryKeyword || unusedClusterKeywords.length === 0) return;
@@ -124,6 +129,66 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     setSuggestionMessage(
       `Added ${relevant.length} relevant keyword${relevant.length > 1 ? "s" : ""} from the bank.`
     );
+  }
+
+  // Fetch keyword ideas from DataForSEO using the primary keyword as seed.
+  // Results are saved to the keywords table (save: true) so they populate
+  // the cluster bank too, and shown as selectable pills below the field.
+  async function fetchDFSKeywords() {
+    if (!primaryKeyword || !clusterId) return;
+    setDfsError(null);
+    setFetchingDFS(true);
+    setDfsOpen(true);
+    setDfsKeywords([]);
+    setDfsSelected(new Set());
+    try {
+      const res = await fetch("/api/keywords/research", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          seed: primaryKeyword,
+          clusterId,
+          mode: "ideas",
+          limit: 20,
+          save: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setDfsError(data.error ?? "DataForSEO lookup failed");
+        return;
+      }
+      const results: DFSKeyword[] = (data.results ?? [])
+        .filter((r: DFSKeyword) => r.keyword.toLowerCase() !== primaryKeyword.toLowerCase())
+        .slice(0, 20);
+      setDfsKeywords(results);
+    } catch {
+      setDfsError("DataForSEO lookup failed");
+    } finally {
+      setFetchingDFS(false);
+    }
+  }
+
+  function toggleDfsKeyword(kw: string) {
+    setDfsSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(kw)) next.delete(kw);
+      else next.add(kw);
+      return next;
+    });
+  }
+
+  function addSelectedDfsKeywords() {
+    if (dfsSelected.size === 0) return;
+    const existing = new Set(
+      supporting.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+    );
+    const toAdd = Array.from(dfsSelected).filter((k) => !existing.has(k.toLowerCase()));
+    if (toAdd.length === 0) return;
+    setSupporting((prev) => (prev.trim() ? `${prev.trim()}, ${toAdd.join(", ")}` : toAdd.join(", ")));
+    setDfsSelected(new Set());
+    setDfsOpen(false);
+    setSuggestionMessage(`Added ${toAdd.length} keyword${toAdd.length > 1 ? "s" : ""} from DataForSEO.`);
   }
 
   function parseSources() {
@@ -259,6 +324,8 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             onChange={(e) => {
               setPrimaryKeyword(e.target.value);
               setTopicRationale(null);
+              setDfsOpen(false);
+              setDfsKeywords([]);
             }}
             placeholder="e.g. best invoicing software for freelancers 2026"
             className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm"
@@ -266,7 +333,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
           {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
           <p className="mt-1 text-xs text-atlasnavy/40">
-            Pick a topic from the bank above, hit "Suggest a topic" for a fresh AI-generated angle, or
+            Pick a topic from the bank above, hit “Suggest a topic” for a fresh AI-generated angle, or
             just type your own.
           </p>
         </div>
@@ -274,15 +341,26 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         <div>
           <div className="flex items-center justify-between">
             <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (comma separated)</label>
-            <button
-              type="button"
-              onClick={suggestSupportingKeywords}
-              disabled={!primaryKeyword || unusedClusterKeywords.length === 0}
-              title="Import unused keywords from this cluster's bank that are actually relevant to the topic above"
-              className="ml-3 shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50"
-            >
-              Add relevant from bank
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={suggestSupportingKeywords}
+                disabled={!primaryKeyword || unusedClusterKeywords.length === 0}
+                title="Import unused keywords from this cluster's bank that are actually relevant to the topic above"
+                className="shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50"
+              >
+                Add relevant from bank
+              </button>
+              <button
+                type="button"
+                onClick={fetchDFSKeywords}
+                disabled={!primaryKeyword || fetchingDFS}
+                title="Fetch real keyword ideas from DataForSEO based on your primary keyword"
+                className="shrink-0 rounded-md border border-atlasteal/60 px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50"
+              >
+                {fetchingDFS ? "Fetching…" : "From DataForSEO"}
+              </button>
+            </div>
           </div>
           <input
             value={supporting}
@@ -290,6 +368,78 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
             className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm"
           />
           {suggestionMessage && <p className="mt-1 text-xs text-atlasnavy/50">{suggestionMessage}</p>}
+          {dfsError && <p className="mt-1 text-xs text-red-600">{dfsError}</p>}
+
+          {/* DataForSEO keyword picker */}
+          {dfsOpen && dfsKeywords.length > 0 && (
+            <div className="mt-2 rounded-md border border-atlasteal/30 bg-atlasteal/5 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-semibold text-atlasnavy">
+                  DataForSEO keyword ideas — click to select, then add:
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setDfsOpen(false)}
+                  className="text-xs text-atlasnavy/40 hover:text-atlasnavy"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {dfsKeywords.map((kw) => {
+                  const selected = dfsSelected.has(kw.keyword);
+                  return (
+                    <button
+                      key={kw.keyword}
+                      type="button"
+                      onClick={() => toggleDfsKeyword(kw.keyword)}
+                      className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                        selected
+                          ? "border-atlasteal bg-atlasteal text-white"
+                          : "border-atlasnavy/20 text-atlasnavy/70 hover:bg-atlasnavy/5"
+                      }`}
+                    >
+                      <span>{kw.keyword}</span>
+                      <span className={`text-[10px] ${selected ? "text-white/70" : "text-atlasnavy/40"}`}>
+                        {fmtVol(kw.volume)}/mo
+                        {kw.difficulty !== null ? ` · KD ${kw.difficulty}` : ""}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={addSelectedDfsKeywords}
+                  disabled={dfsSelected.size === 0}
+                  className="rounded-md bg-atlasteal px-3 py-1 text-xs font-semibold text-white disabled:opacity-40"
+                >
+                  Add {dfsSelected.size > 0 ? `${dfsSelected.size} selected` : "selected"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const all = new Set(dfsKeywords.map((k) => k.keyword));
+                    setDfsSelected(all);
+                  }}
+                  className="text-xs text-atlasteal hover:underline"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDfsSelected(new Set())}
+                  className="text-xs text-atlasnavy/50 hover:underline"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+          {dfsOpen && !fetchingDFS && dfsKeywords.length === 0 && !dfsError && (
+            <p className="mt-1 text-xs text-atlasnavy/50">No keyword ideas returned — try a different topic.</p>
+          )}
         </div>
 
         <div>
