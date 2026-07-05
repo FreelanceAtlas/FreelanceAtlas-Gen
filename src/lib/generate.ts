@@ -949,6 +949,103 @@ export function redactFiguresFlaggedByFactCheck(
   };
 }
 
+// --- Round 13: descriptive (non-numeric) claim backstop --------------------------------
+// The figure-based backstops above catch fabricated numbers (prices, storage sizes, counts,
+// percentages) but cannot touch descriptive claims with no number attached. A HIGH severity
+// issue flagging e.g. "Trello includes unlimited Power-Ups on every plan" has no figure for
+// redactFiguresFlaggedByFactCheck to anchor on, so it passes through untouched. This adds a
+// complementary pass: for each HIGH severity issue whose claim/concern text does not contain
+// any figure-shaped pattern (i.e., was not already handled by the figure backstop), extract
+// explicitly quoted substrings from the claim/concern (the fact-checker consistently wraps
+// verbatim article text in quotes) and redact any that appear verbatim in the article with a
+// visible placeholder. Only quoted phrases >= 15 characters are considered, to avoid
+// single-word or too-short matches that would over-redact. The verbatim-match check is the
+// key safety gate: a phrase paraphrased by the fact-checker that doesn't appear word-for-word
+// in the article simply won't match, so this is a no-op for non-verbatim descriptions.
+const DESCRIPTIVE_UNCONFIRMED_PLACEHOLDER = "[claim unconfirmed, check the provider's current page]";
+
+function issueHasNumericFigure(issue: FactCheckIssue): boolean {
+  for (const text of [issue.claim, issue.concern]) {
+    for (const { pattern } of FLAGGED_FIGURE_PATTERNS) {
+      // Reset lastIndex in case the pattern has the global flag and was used elsewhere
+      pattern.lastIndex = 0;
+      if (pattern.test(text)) return true;
+    }
+  }
+  return false;
+}
+
+function extractDescriptivePhrases(text: string): string[] {
+  const phrases: string[] = [];
+  // Pull explicitly quoted substrings — the fact-checker typically quotes the verbatim
+  // article sentence that contains the problem, making this a reliable extraction target.
+  const quoted = text.match(/[“”„‘’']([^"']{15,}?)[“”„‘’']/g);
+  if (quoted) {
+    for (const q of quoted) {
+      const phrase = q.replace(/^[“”„‘’']|[“”„‘’']$/g, "").trim();
+      if (phrase.length >= 15) phrases.push(phrase);
+    }
+  }
+  return phrases;
+}
+
+export function redactDescriptiveClaimsFlaggedByFactCheck(
+  article: GeneratedArticle,
+  issues: FactCheckIssue[]
+): GeneratedArticle {
+  const toRedact = new Set<string>();
+
+  for (const issue of issues) {
+    if (issue.severity !== "high") continue;
+    // Skip issues already handled by the numeric figure backstop — this function
+    // only exists to catch the purely descriptive remainder.
+    if (issueHasNumericFigure(issue)) continue;
+
+    for (const text of [issue.claim, issue.concern]) {
+      for (const phrase of extractDescriptivePhrases(text)) {
+        toRedact.add(phrase);
+      }
+    }
+  }
+
+  if (toRedact.size === 0) return article;
+
+  // Confirm each candidate phrase actually appears verbatim in the article before
+  // redacting — this is the key safety check that prevents false positives from
+  // paraphrased or fact-checker-invented descriptions that never made it into the draft.
+  const articleText = [
+    article.title,
+    article.meta_title,
+    article.meta_description,
+    article.h1,
+    article.content_md,
+    ...article.faqs.map((f) => f.question + " " + f.answer),
+  ].join(" ");
+
+  const confirmedToRedact = Array.from(toRedact).filter((phrase) =>
+    articleText.includes(phrase)
+  );
+
+  if (confirmedToRedact.length === 0) return article;
+
+  const redact = (text: string): string =>
+    confirmedToRedact.reduce(
+      (result, phrase) =>
+        result.replace(new RegExp(escapeForLiteralRegex(phrase), "g"), DESCRIPTIVE_UNCONFIRMED_PLACEHOLDER),
+      text
+    );
+
+  return {
+    ...article,
+    title: redact(article.title),
+    meta_title: redact(article.meta_title),
+    meta_description: redact(article.meta_description),
+    h1: redact(article.h1),
+    content_md: redact(article.content_md),
+    faqs: article.faqs.map((f) => ({ question: redact(f.question), answer: redact(f.answer) })),
+  };
+}
+
 // --- Generation-time self-correction gate ----------------------------------------------
 // Relying on the downstream fact-check (src/app/api/generate/route.ts) as the only line of
 // defense meant every fabricated number reached a human editor as a "needs review" draft
