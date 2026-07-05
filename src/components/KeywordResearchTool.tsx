@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import type { ScoredKeyword } from "@/app/api/keywords/research-engine/route";
+import type { ScoredKeyword, SeedCategories } from "@/app/api/keywords/research-engine/route";
 
 interface Cluster { id: string; name: string; }
 interface BaseKw {
@@ -53,6 +53,12 @@ const PHASES = [
   "Ranking by opportunity…",
 ];
 
+const CATEGORY_META = [
+  { key: "core",     label: "Core",     color: "bg-atlasteal/10 text-atlasteal" },
+  { key: "adjacent", label: "Adjacent",  color: "bg-orange-50 text-orange-600" },
+  { key: "problem",  label: "Problem",   color: "bg-purple-50 text-purple-600" },
+] as const;
+
 export default function KeywordResearchTool({ clusters }: { clusters: Cluster[] }) {
   const [seed, setSeed] = useState("");
   const [mode, setMode] = useState<Mode>("related");
@@ -67,8 +73,10 @@ export default function KeywordResearchTool({ clusters }: { clusters: Cluster[] 
   const [sortCol, setSortCol] = useState<SortCol>("volume");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [lastSeed, setLastSeed] = useState("");
-  const [engineMeta, setEngineMeta] = useState<{ seeds: string[]; totalScanned: number } | null>(null);
-  // Filters (engine mode only)
+  const [engineMeta, setEngineMeta] = useState<{
+    seedCategories: SeedCategories;
+    totalScanned: number;
+  } | null>(null);
   const [intentFilter, setIntentFilter] = useState<string | null>(null);
   const [clusterFilter, setClusterFilter] = useState<string | null>(null);
 
@@ -114,7 +122,6 @@ export default function KeywordResearchTool({ clusters }: { clusters: Cluster[] 
     return <span className="ml-0.5">{sortDir === "asc" ? "↑" : "↓"}</span>;
   }
 
-  // Advance phase indicator during engine search
   function startPhaseLoop(): () => void {
     let i = 0;
     setPhase(0);
@@ -151,7 +158,10 @@ export default function KeywordResearchTool({ clusters }: { clusters: Cluster[] 
         const data = await res.json();
         if (!res.ok) { setError(data.error ?? "Engine failed"); return; }
         setResults(data.results ?? []);
-        setEngineMeta({ seeds: data.seeds ?? [], totalScanned: data.totalScanned ?? 0 });
+        setEngineMeta({
+          seedCategories: data.seedCategories ?? { core: [], adjacent: [], problem: [] },
+          totalScanned: data.totalScanned ?? 0,
+        });
         setSortCol("opportunity");
         setSortDir("desc");
       } else {
@@ -251,13 +261,17 @@ export default function KeywordResearchTool({ clusters }: { clusters: Cluster[] 
         </button>
       </div>
 
-      {/* Engine mode description */}
+      {/* Engine description */}
       {mode === "engine" && !loading && results.length === 0 && !lastSeed && (
         <div className="rounded-lg border border-atlasteal/20 bg-atlasteal/5 px-4 py-3 text-sm text-atlasnavy/70">
           <p className="font-semibold text-atlasnavy">⚡ Autonomous Engine</p>
-          <p className="mt-0.5 text-xs">
-            Generates seed phrases → 2 rounds of DataForSEO expansion → Claude scores every result for intent, freelancer audience fit, and cluster → ranks by opportunity score.
-            Takes ~15–20 seconds.
+          <p className="mt-1 text-xs leading-relaxed">
+            Generates 3 categories of seeds —
+            <span className="font-medium text-atlasteal"> Core</span> (direct topic terms),
+            <span className="font-medium text-orange-600"> Adjacent</span> (lateral buyer-journey topics), and
+            <span className="font-medium text-purple-600"> Problem</span> (pain points this solves) —
+            then expands each with DataForSEO, scores every result for intent &amp; freelancer relevance, and ranks by opportunity.
+            Takes ~20–30 seconds.
           </p>
         </div>
       )}
@@ -290,18 +304,35 @@ export default function KeywordResearchTool({ clusters }: { clusters: Cluster[] 
 
       {results.length > 0 && (
         <>
-          {/* Engine meta */}
+          {/* Seed categories breakdown */}
           {engineMeta && (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-atlasnavy/40">
-              <span>Seeds used:</span>
-              {engineMeta.seeds.map((s) => (
-                <span key={s} className="rounded-full bg-atlasnavy/8 px-2 py-0.5 text-atlasnavy/60">{s}</span>
-              ))}
-              <span className="ml-2">· {engineMeta.totalScanned} total scanned</span>
+            <div className="rounded-lg border border-atlasnavy/10 bg-atlasnavy/[0.02] px-4 py-3 text-xs">
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className="font-semibold text-atlasnavy/40 uppercase tracking-wide text-[10px]">Seeds explored</span>
+                <span className="text-atlasnavy/30">· {engineMeta.totalScanned} keywords scanned</span>
+              </div>
+              <div className="space-y-1.5">
+                {CATEGORY_META.map(({ key, label, color }) => {
+                  const phrases = engineMeta.seedCategories[key as keyof SeedCategories] ?? [];
+                  if (phrases.length === 0) return null;
+                  return (
+                    <div key={key} className="flex items-start gap-2">
+                      <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${color}`}>
+                        {label}
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {phrases.map((p) => (
+                          <span key={p} className="rounded bg-atlasnavy/5 px-1.5 py-0.5 text-atlasnavy/60">{p}</span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* Filters (engine only) */}
+          {/* Filters */}
           {mode === "engine" && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-semibold text-atlasnavy/40">Intent:</span>
