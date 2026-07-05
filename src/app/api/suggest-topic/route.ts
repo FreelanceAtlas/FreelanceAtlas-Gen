@@ -34,8 +34,24 @@ export async function POST(request: Request) {
       coveredKeywords,
       coveredTitles,
     });
+
+    // Save this suggestion to the keyword bank so:
+    // 1. It persists for later use even if the user picks a different topic now
+    // 2. The next "Suggest a topic" click avoids it (it's now in coveredKeywords)
+    await supabase.from("keywords").upsert(
+      {
+        cluster_id: clusterId,
+        keyword: suggestion.topic,
+        search_intent: "informational",
+        research_source: "ai-suggested",
+        is_used: false,
+      },
+      { onConflict: "cluster_id,keyword", ignoreDuplicates: true }
+    );
+
     return NextResponse.json(suggestion);
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message ?? "Could not suggest a topic" }, { status: 500 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Could not suggest a topic";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

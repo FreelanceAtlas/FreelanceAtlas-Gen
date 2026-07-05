@@ -45,20 +45,26 @@ function downgradeTier(tier: KeywordTier): KeywordTier {
 function deriveTier(kw: KeywordMetrics, audienceFit: number, topic: string): KeywordTier {
   const words = kw.keyword.toLowerCase().split(/\s+/);
   const vol = kw.volume ?? 0;
+  const topicWords = new Set(
+    topic.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4)
+  );
 
   // Single-word → always check
   if (words.length === 1) return "check";
 
+  // Base tier from audience_fit
   let tier: KeywordTier = audienceFit >= 4 ? "recommended" : audienceFit >= 3 ? "related" : "check";
 
-  // High-volume short term with no topic word overlap → downgrade
+  // Rule 0: Promote — multi-word with topic overlap → bump related → recommended
+  if (tier === "related" && words.length >= 2) {
+    const hasTopicWord = words.some((w) => w.length >= 4 && topicWords.has(w));
+    if (hasTopicWord) tier = "recommended";
+  }
+
+  // Rule 2: High-vol short generic with no topic overlap → downgrade
   if (vol > 10_000 && words.length <= 2) {
-    const topicWords = new Set(
-      topic.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4)
-    );
-    if (!words.some((w) => topicWords.has(w))) {
-      tier = downgradeTier(tier);
-    }
+    const hasTopicWord = words.some((w) => topicWords.has(w));
+    if (!hasTopicWord) tier = downgradeTier(tier);
   }
 
   return tier;
@@ -199,7 +205,6 @@ export async function POST(request: Request) {
 
   const scored = await scoreKeywords(combined.slice(0, 70), topic, apiKey);
 
-  // Keep audience_fit >= 3, sort by tier then opportunity
   const TIER_RANK: Record<KeywordTier, number> = { recommended: 0, related: 1, check: 2 };
   const results = scored
     .filter((k) => k.audience_fit >= 3)

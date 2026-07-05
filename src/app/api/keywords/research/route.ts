@@ -21,11 +21,14 @@ function downgradeTier(tier: KeywordTier): KeywordTier {
   return TIER_ORDER[Math.min(idx + 1, TIER_ORDER.length - 1)];
 }
 
-// Post-Claude heuristic penalties for generic/off-topic keywords.
-// Claude is good at semantics but over-trusts high-volume terms.
-// These rules are deterministic and always applied after scoring.
+/**
+ * Post-Claude heuristic adjustments — always run after scoring.
+ *
+ * Rule 0 (promote):  multi-word keyword shares a topic word → related → recommended
+ * Rule 1 (penalise): single-word keywords are too broad → always check
+ * Rule 2 (penalise): high-volume (>10k) + ≤2 words + no topic overlap → downgrade one tier
+ */
 function applyHeuristicPenalties(keywords: TieredKeyword[], topic: string): TieredKeyword[] {
-  // Extract meaningful words from the topic (4+ chars) as relevance anchors
   const topicWords = new Set(
     topic.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
       .filter((w) => w.length >= 4)
@@ -36,14 +39,23 @@ function applyHeuristicPenalties(keywords: TieredKeyword[], topic: string): Tier
     const vol = k.volume ?? 0;
     let { tier } = k;
 
-    // Rule 1: Single-word keywords are always too broad to target → check
+    // Rule 0: Promote — multi-word with a topic word → bump related → recommended
+    if (words.length >= 2 && tier === "related") {
+      const hasTopicWord = words.some((w) => w.length >= 4 && topicWords.has(w));
+      if (hasTopicWord) {
+        tier = "recommended";
+        console.log(`[heuristic] promote "${k.keyword}" related → recommended`);
+      }
+    }
+
+    // Rule 1: Single-word → always check
     if (words.length === 1) {
       tier = "check";
       console.log(`[heuristic] single-word "${k.keyword}" → check`);
       return { ...k, tier };
     }
 
-    // Rule 2: High-volume (>10k/mo) + short (≤2 words) + no topic word overlap → downgrade
+    // Rule 2: High-vol generic (no topic overlap) → downgrade one tier
     if (vol > 10_000 && words.length <= 2) {
       const hasTopicWord = words.some((w) => topicWords.has(w));
       if (!hasTopicWord) {
@@ -180,10 +192,10 @@ async function scoreKeywords(
     const penalized = applyHeuristicPenalties(tiered, topic);
 
     const recommended = penalized.filter((k) => k.tier === "recommended");
-    const related = penalized.filter((k) => k.tier === "related");
-    const check = penalized.filter((k) => k.tier === "check");
+    const related     = penalized.filter((k) => k.tier === "related");
+    const check       = penalized.filter((k) => k.tier === "check");
 
-    console.log(`[keywords/research] Tiers after penalties: ${recommended.length} recommended, ${related.length} related, ${check.length} check`);
+    console.log(`[keywords/research] Tiers after heuristics: ${recommended.length} recommended, ${related.length} related, ${check.length} check`);
 
     const topCheck = check.slice(0, Math.max(0, limit - recommended.length - related.length));
     return [...recommended, ...related, ...topCheck].slice(0, limit);

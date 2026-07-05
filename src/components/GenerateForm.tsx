@@ -135,6 +135,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
   const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
 
+  // AI-suggested topics (research_source = "ai-suggested") show in the bank and are clickable
+  // They're already in clusterKeywords — the bank chips below handle them
+
   const byTier = {
     recommended: dfsKeywords.filter((k) => k.tier === "recommended"),
     related:     dfsKeywords.filter((k) => k.tier === "related"),
@@ -151,6 +154,9 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
       const data = await res.json();
       if (!res.ok) { setTopicError(data.error ?? "Could not suggest a topic"); return; }
       setPrimaryKeyword(data.topic); setTopicRationale(data.rationale ?? null); setOutline([]);
+      // Refresh the server component so the bank shows this newly saved suggestion
+      // (next click will also avoid it since it's now in coveredKeywords)
+      router.refresh();
     } catch { setTopicError("Could not suggest a topic"); }
     finally { setSuggestingTopic(false); }
   }
@@ -316,7 +322,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
           {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
           {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
           <p className="mt-1 text-xs text-atlasnavy/40">
-            Pick a topic from the bank above, hit “Suggest a topic” for a fresh AI-generated angle, or just type your own.
+            Each suggestion is saved to the bank. Click again for a fresh angle — previously suggested topics stay in the bank for later.
           </p>
         </div>
 
