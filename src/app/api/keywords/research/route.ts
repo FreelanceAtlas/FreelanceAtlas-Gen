@@ -15,6 +15,48 @@ export const maxDuration = 60;
 export type KeywordTier = "recommended" | "related" | "check";
 export interface TieredKeyword extends KeywordMetrics { tier: KeywordTier; }
 
+const TIER_ORDER: KeywordTier[] = ["recommended", "related", "check"];
+function downgradeTier(tier: KeywordTier): KeywordTier {
+  const idx = TIER_ORDER.indexOf(tier);
+  return TIER_ORDER[Math.min(idx + 1, TIER_ORDER.length - 1)];
+}
+
+// Post-Claude heuristic penalties for generic/off-topic keywords.
+// Claude is good at semantics but over-trusts high-volume terms.
+// These rules are deterministic and always applied after scoring.
+function applyHeuristicPenalties(keywords: TieredKeyword[], topic: string): TieredKeyword[] {
+  // Extract meaningful words from the topic (4+ chars) as relevance anchors
+  const topicWords = new Set(
+    topic.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+      .filter((w) => w.length >= 4)
+  );
+
+  return keywords.map((k) => {
+    const words = k.keyword.toLowerCase().split(/\s+/);
+    const vol = k.volume ?? 0;
+    let { tier } = k;
+
+    // Rule 1: Single-word keywords are always too broad to target → check
+    if (words.length === 1) {
+      tier = "check";
+      console.log(`[heuristic] single-word "${k.keyword}" → check`);
+      return { ...k, tier };
+    }
+
+    // Rule 2: High-volume (>10k/mo) + short (≤2 words) + no topic word overlap → downgrade
+    if (vol > 10_000 && words.length <= 2) {
+      const hasTopicWord = words.some((w) => topicWords.has(w));
+      if (!hasTopicWord) {
+        const prev = tier;
+        tier = downgradeTier(tier);
+        console.log(`[heuristic] high-vol generic "${k.keyword}" (${vol}) ${prev} → ${tier}`);
+      }
+    }
+
+    return { ...k, tier };
+  });
+}
+
 function deriveShortSeed(topic: string): string {
   return topic
     .replace(/\(.*?\)/g, "")
@@ -84,10 +126,6 @@ async function expandTopicToSeeds(
   }
 }
 
-// Score every keyword 1-3 and attach a tier.
-// 3 = directly about this topic → "recommended"
-// 2 = adjacent, freelancer would find useful → "related"
-// 1 = unrelated / coincidental match → "check"
 async function scoreKeywords(
   candidates: KeywordMetrics[],
   topic: string,
@@ -112,7 +150,7 @@ async function scoreKeywords(
     `  3 = directly about this topic — confidently recommend it\n` +
     `  2 = adjacent — a freelancer on this topic would find it useful\n` +
     `  1 = unrelated, off-topic, or only a coincidental word match\n\n` +
-    `Rule: when in doubt, score lower.\n\n` +
+    `Rule: when in doubt, score lower. Generic single-topic words score 1.\n\n` +
     `Return ONLY JSON: [{"n":1,"s":3},{"n":2,"s":1},...] where n=line number, s=score.\n\n` +
     `Keywords:\n${kwList}`;
 
@@ -131,7 +169,6 @@ async function scoreKeywords(
 
     const scores = JSON.parse(jsonMatch[0]) as Array<{ n: number; s: number }>;
     const scoreMap = new Map(scores.map((x) => [x.n - 1, x.s]));
-
     const TIER: Record<number, KeywordTier> = { 3: "recommended", 2: "related", 1: "check" };
 
     const tiered: TieredKeyword[] = pool.map((k, i) => ({
@@ -139,13 +176,15 @@ async function scoreKeywords(
       tier: TIER[scoreMap.get(i) ?? 1] ?? "check",
     }));
 
-    const recommended = tiered.filter((k) => k.tier === "recommended");
-    const related = tiered.filter((k) => k.tier === "related");
-    const check = tiered.filter((k) => k.tier === "check");
+    // Apply deterministic heuristics on top of Claude's scores
+    const penalized = applyHeuristicPenalties(tiered, topic);
 
-    console.log(`[keywords/research] Tiers: ${recommended.length} recommended, ${related.length} related, ${check.length} check`);
+    const recommended = penalized.filter((k) => k.tier === "recommended");
+    const related = penalized.filter((k) => k.tier === "related");
+    const check = penalized.filter((k) => k.tier === "check");
 
-    // Return up to limit across all tiers, prioritising recommended → related → check
+    console.log(`[keywords/research] Tiers after penalties: ${recommended.length} recommended, ${related.length} related, ${check.length} check`);
+
     const topCheck = check.slice(0, Math.max(0, limit - recommended.length - related.length));
     return [...recommended, ...related, ...topCheck].slice(0, limit);
   } catch (e) {
