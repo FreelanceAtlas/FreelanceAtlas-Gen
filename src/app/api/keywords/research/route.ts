@@ -11,7 +11,8 @@
 //   locationCode number?  — DataForSEO location code (default 2840 = US)
 //   mode         string?  — "ideas" (default) | "related" | "metrics"
 //                           ideas    → keyword_ideas endpoint (best for discovery)
-//                           related  → related_keywords endpoint (broader)
+//                           related  → related_keywords endpoint (broader semantic)
+//                                       auto-falls back to ideas if empty
 //                           metrics  → search_volume endpoint (enrich existing list)
 //   keywords     string[] — required when mode="metrics"
 //   limit        number?  — max results to return (default 50)
@@ -67,13 +68,19 @@ export async function POST(request: Request) {
     if (mode === "metrics") {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
     } else if (mode === "related") {
+      // Try semantic related keywords first; fall back to ideas if the seed
+      // doesn’t have enough SERP-clustering data in DataForSEO.
       results = await getRelatedKeywords(seed!, { locationCode, limit });
+      if (results.length === 0) {
+        results = await getKeywordIdeas(seed!, { locationCode, limit });
+      }
     } else {
       results = await getKeywordIdeas(seed!, { locationCode, limit });
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "DataForSEO request failed";
     return NextResponse.json(
-      { error: err?.message ?? "DataForSEO request failed" },
+      { error: message },
       { status: 502 }
     );
   }
