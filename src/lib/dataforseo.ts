@@ -59,6 +59,8 @@ export interface KeywordMetrics {
 }
 
 // --- Keyword Ideas (DataForSEO Labs) ------------------------------------
+// Endpoint: /dataforseo_labs/google/keyword_ideas/live
+// Request field: `keywords` (array of strings) — NOT the singular `keyword`
 
 interface DfsKeywordIdeasItem {
   keyword: string;
@@ -95,25 +97,22 @@ export async function getKeywordIdeas(
     locationCode?: number;
     languageCode?: string;
     limit?: number;
-    includeAdult?: boolean;
   } = {}
 ): Promise<KeywordMetrics[]> {
   const {
     locationCode = DEFAULT_LOCATION_CODE,
     languageCode = DEFAULT_LANGUAGE_CODE,
     limit = 50,
-    includeAdult = false,
   } = options;
 
   const response = await dfsPost<DfsKeywordIdeasResponse>(
     "/dataforseo_labs/google/keyword_ideas/live",
     [
       {
-        keyword: seed,
+        keywords: [seed],          // array, not singular string
         location_code: locationCode,
         language_code: languageCode,
         limit,
-        include_adult_keywords: includeAdult,
         include_serp_info: false,
       },
     ]
@@ -286,7 +285,7 @@ export async function getRelatedKeywords(
     "/dataforseo_labs/google/related_keywords/live",
     [
       {
-        keyword: seed,
+        keyword: seed,             // related_keywords uses singular `keyword`
         location_code: locationCode,
         language_code: languageCode,
         limit,
