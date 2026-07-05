@@ -4,7 +4,6 @@
 
 const DFS_BASE = "https://api.dataforseo.com/v3";
 
-// Default to US English. Pass a different locationCode/languageCode per call to override.
 export const DEFAULT_LOCATION_CODE = 2840; // United States
 export const DEFAULT_LANGUAGE_CODE = "en";
 
@@ -51,25 +50,15 @@ export interface MonthlySearch {
 
 export interface KeywordMetrics {
   keyword: string;
-  volume: number | null;          // avg monthly search volume
-  difficulty: number | null;      // 0-100 keyword difficulty
-  cpc: number | null;             // avg CPC in USD
-  competition: number | null;     // 0-1 competition score
-  trend: MonthlySearch[];         // last 12 months of monthly search volume
-  search_intent: string | null;   // informational | navigational | commercial | transactional
+  volume: number | null;
+  difficulty: number | null;
+  cpc: number | null;
+  competition: number | null;
+  trend: MonthlySearch[];
+  search_intent: string | null;
 }
 
 // --- Keyword Ideas (DataForSEO Labs) ------------------------------------
-// Returns keyword ideas for a seed keyword with full metrics.
-//
-// Response shape: tasks[0].result[0].items[] — each item has:
-//   item.keyword                              string
-//   item.keyword_info.search_volume           number
-//   item.keyword_info.cpc                     number
-//   item.keyword_info.competition             number
-//   item.keyword_info.monthly_searches        array
-//   item.keyword_info.search_intent           { main_intent }
-//   item.keyword_properties.keyword_difficulty number
 
 interface DfsKeywordIdeasItem {
   keyword: string;
@@ -131,10 +120,22 @@ export async function getKeywordIdeas(
   );
 
   const task = response.tasks?.[0];
-  if (!task || task.status_code !== 20000) return [];
+  if (!task) {
+    console.error(`[dataforseo] keyword_ideas "${seed}": no task in response`);
+    return [];
+  }
+  if (task.status_code !== 20000) {
+    console.error(
+      `[dataforseo] keyword_ideas "${seed}": task status ${task.status_code} — ${task.status_message}`
+    );
+    return [];
+  }
 
   const items = task.result?.[0]?.items;
-  if (!items) return [];
+  if (!items || items.length === 0) {
+    console.warn(`[dataforseo] keyword_ideas "${seed}": task OK but items empty/null`);
+    return [];
+  }
 
   return items
     .filter((item) => !!item.keyword)
@@ -149,8 +150,7 @@ export async function getKeywordIdeas(
     }));
 }
 
-// --- Keyword Search Volume (Google Ads data) ---------------------------
-// Returns volume + CPC + competition for a list of known keywords.
+// --- Keyword Search Volume (Google Ads data) ----------------------------
 
 interface DfsSearchVolumeResponse {
   status_code: number;
@@ -200,7 +200,14 @@ export async function getKeywordMetrics(
     );
 
     const task = response.tasks?.[0];
-    if (!task || task.status_code !== 20000 || !task.result) continue;
+    if (!task || task.status_code !== 20000 || !task.result) {
+      console.error(
+        `[dataforseo] search_volume batch: task status ${
+          task?.status_code
+        } — ${task?.status_message}`
+      );
+      continue;
+    }
 
     for (const item of task.result) {
       if (!item.keyword) continue;
@@ -219,20 +226,12 @@ export async function getKeywordMetrics(
   return results;
 }
 
-// --- Related Keywords (DataForSEO Labs) --------------------------------
-// Returns keywords semantically related to the seed.
+// --- Related Keywords (DataForSEO Labs) ---------------------------------
 //
-// IMPORTANT: The response structure nests everything under keyword_data:
-//   item.keyword_data.keyword                              string
-//   item.keyword_data.keyword_info.search_volume           number
-//   item.keyword_data.keyword_info.cpc                     number
-//   item.keyword_data.keyword_info.competition             number
-//   item.keyword_data.keyword_info.monthly_searches        array
-//   item.keyword_data.keyword_info.search_intent_info      { main_intent }
-//   item.keyword_data.keyword_properties.keyword_difficulty number
-//
-// Unlike keyword_ideas where keyword and metrics live at the top level,
-// here everything is under keyword_data.
+// IMPORTANT: response nests everything under keyword_data:
+//   item.keyword_data.keyword
+//   item.keyword_data.keyword_info.*
+//   item.keyword_data.keyword_properties.*
 
 interface DfsRelatedKeywordsItem {
   keyword_data: {
@@ -242,7 +241,6 @@ interface DfsRelatedKeywordsItem {
       competition: number | null;
       cpc: number | null;
       monthly_searches: MonthlySearch[] | null;
-      // DataForSEO uses search_intent_info (not search_intent) in related_keywords
       search_intent_info?: { main_intent: string } | null;
       search_intent?: { main_intent: string } | null;
     };
@@ -299,13 +297,24 @@ export async function getRelatedKeywords(
   );
 
   const task = response.tasks?.[0];
-  if (!task || task.status_code !== 20000) return [];
+  if (!task) {
+    console.error(`[dataforseo] related_keywords "${seed}": no task in response`);
+    return [];
+  }
+  if (task.status_code !== 20000) {
+    console.error(
+      `[dataforseo] related_keywords "${seed}": task status ${task.status_code} — ${task.status_message}`
+    );
+    return [];
+  }
 
   const items = task.result?.[0]?.items;
-  if (!items) return [];
+  if (!items || items.length === 0) {
+    console.warn(`[dataforseo] related_keywords "${seed}": task OK but items empty/null`);
+    return [];
+  }
 
   return items
-    // keyword is nested under keyword_data, not at item level
     .filter((item) => !!item.keyword_data?.keyword)
     .map((item) => {
       const kd = item.keyword_data;
@@ -317,7 +326,6 @@ export async function getRelatedKeywords(
         cpc: ki?.cpc ?? null,
         competition: ki?.competition ?? null,
         trend: ki?.monthly_searches ?? [],
-        // DataForSEO uses search_intent_info in related_keywords
         search_intent:
           ki?.search_intent_info?.main_intent ??
           ki?.search_intent?.main_intent ??
