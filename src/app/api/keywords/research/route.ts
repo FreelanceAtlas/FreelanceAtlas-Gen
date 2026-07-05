@@ -5,11 +5,6 @@
 //   clusterId    string   — which cluster to save keywords under
 //   locationCode number?  — DataForSEO location code (default 2840 = US)
 //   mode         string?  — "topic" (default) | "ideas" | "related" | "metrics"
-//                           topic   → Claude generates search queries from topic,
-//                                     then keyword_ideas for each (recommended)
-//                           ideas   → keyword_ideas for the seed directly
-//                           related → related_keywords for the seed
-//                           metrics → search_volume for an existing list
 //   keywords     string[] — required when mode="metrics"
 //   limit        number?  — max results to return (default 50)
 //   save         boolean? — if true, upsert results into the keywords table
@@ -26,50 +21,78 @@ import {
 
 export const maxDuration = 60;
 
-// Use Claude to expand an article topic into 5 short, specific search query
-// phrases (2-4 words each) that people interested in this topic actually
-// search for. These become DataForSEO seeds so keyword_ideas returns real
-// search data for every angle of the topic.
+// Derive a short fallback seed from a long article title.
+// Strips leading question words, parentheticals, and caps at 4 words.
+function deriveShortSeed(topic: string): string {
+  return topic
+    .replace(/\(.*?\)/g, "")           // remove (parentheticals)
+    .replace(/^(how to|what is|why|when|where|who|which|can you)\s+/i, "")
+    .replace(/\bthat\b.*/i, "")        // stop at relative clauses
+    .trim()
+    .split(/\s+/)
+    .slice(0, 4)
+    .join(" ")
+    .toLowerCase();
+}
+
 async function expandTopicToQueries(topic: string): Promise<string[]> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
+  if (!apiKey) {
+    console.error("[keywords/research] ANTHROPIC_API_KEY not set");
+    return [];
+  }
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 150,
-      messages: [
-        {
+  let data: Record<string, unknown>;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 150,
+        messages: [{
           role: "user",
           content:
             `Article topic: "${topic}"\n\n` +
             `List exactly 5 specific Google search queries (2-4 words each) that someone researching this topic would type. ` +
             `Each query should cover a distinct angle or subtopic. ` +
             `Return only the queries, one per line, no numbering, no explanation.`,
-        },
-      ],
-    }),
-  });
+        }],
+      }),
+    });
 
-  if (!res.ok) {
-    throw new Error(`Claude query expansion failed (${res.status})`);
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[keywords/research] Claude API error ${res.status}:`, text);
+      return [];
+    }
+    data = await res.json();
+  } catch (e) {
+    console.error("[keywords/research] Claude fetch failed:", e);
+    return [];
   }
 
-  const data = await res.json();
-  const text: string =
-    data.content?.[0]?.type === "text" ? data.content[0].text : "";
+  const content = data.content as Array<{ type: string; text?: string }> | undefined;
+  if (!content || content[0]?.type !== "text") {
+    console.error("[keywords/research] Unexpected Claude response:", JSON.stringify(data).slice(0, 300));
+    return [];
+  }
 
-  return text
+  const text = content[0].text ?? "";
+  console.log("[keywords/research] Claude raw output:", text);
+
+  const queries = text
     .split("\n")
-    .map((s: string) => s.trim().replace(/^[-\d\.\)\*\"]+\s*/, "").replace(/\"$/, "").toLowerCase())
-    .filter((s: string) => s.length > 3 && s.split(/\s+/).length >= 2)
+    .map((s) => s.trim().replace(/^[-\d\.\)\*\"]+\s*/, "").replace(/\"$/, "").toLowerCase())
+    .filter((s) => s.length > 3 && s.split(/\s+/).length >= 2)
     .slice(0, 5);
+
+  console.log("[keywords/research] Parsed queries:", queries);
+  return queries;
 }
 
 export async function POST(request: Request) {
@@ -105,22 +128,39 @@ export async function POST(request: Request) {
   }
 
   let results: KeywordMetrics[];
+  let debugQueries: string[] = [];
 
   try {
     if (mode === "metrics") {
       results = await getKeywordMetrics(inputKeywords, { locationCode });
 
     } else if (mode === "topic") {
-      // Step 1: Claude reads the full topic and generates 5 search queries
-      const queries = await expandTopicToQueries(seed!);
+      // Step 1: Claude generates 5 focused search queries from the topic
+      let queries = await expandTopicToQueries(seed!);
+
+      // Fallback: if Claude returned nothing, derive a short seed manually
+      if (queries.length === 0) {
+        const fallback = deriveShortSeed(seed!);
+        console.log("[keywords/research] Claude returned 0 queries, falling back to:", fallback);
+        queries = [fallback];
+      }
+
+      debugQueries = queries;
+      console.log("[keywords/research] Fetching keyword_ideas for queries:", queries);
 
       // Step 2: keyword_ideas for each query in parallel
+      const perQueryLimit = Math.max(12, Math.ceil(limit / queries.length) + 5);
       const perQuery = await Promise.all(
         queries.map((q) =>
-          getKeywordIdeas(q, {
-            locationCode,
-            limit: Math.ceil(limit / queries.length) + 5,
-          })
+          getKeywordIdeas(q, { locationCode, limit: perQueryLimit })
+            .then((r) => {
+              console.log(`[keywords/research] "${q}" -> ${r.length} results`);
+              return r;
+            })
+            .catch((e) => {
+              console.error(`[keywords/research] keyword_ideas failed for "${q}":`, e);
+              return [] as KeywordMetrics[];
+            })
         )
       );
 
@@ -137,6 +177,8 @@ export async function POST(request: Request) {
         .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0))
         .slice(0, limit);
 
+      console.log(`[keywords/research] Final: ${results.length} keywords after dedup`);
+
     } else if (mode === "related") {
       results = await getRelatedKeywords(seed!, { locationCode, limit });
       if (results.length === 0) {
@@ -148,6 +190,7 @@ export async function POST(request: Request) {
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "DataForSEO request failed";
+    console.error("[keywords/research] Unhandled error:", message);
     return NextResponse.json({ error: message }, { status: 502 });
   }
 
@@ -185,11 +228,11 @@ export async function POST(request: Request) {
 
     if (upsertError) {
       return NextResponse.json(
-        { results, saveError: upsertError.message },
+        { results, queries: debugQueries, saveError: upsertError.message },
         { status: 200 }
       );
     }
   }
 
-  return NextResponse.json({ results, saved: save && results.length > 0 });
+  return NextResponse.json({ results, queries: debugQueries, saved: save && results.length > 0 });
 }
