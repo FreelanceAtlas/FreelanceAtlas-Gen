@@ -99,33 +99,6 @@ export async function publishArticleToSite(articleId: string) {
   return { link };
 }
 
-// Formats an article passed in directly (no database) and creates a WordPress
-// DRAFT from it. Used by the /dashboard/wp-test page to exercise the whole
-// format -> publish path without Supabase. Returns the WP admin edit link.
-export async function publishContentToWordPress(input: {
-  h1: string;
-  title: string;
-  meta_title: string;
-  meta_description: string;
-  slug: string;
-  content_md: string;
-  faqs: { question: string; answer: string }[];
-}) {
-  const article = {
-    h1: input.h1,
-    title: input.title || input.h1,
-    meta_title: input.meta_title,
-    meta_description: input.meta_description,
-    slug: input.slug,
-    content_md: input.content_md,
-    faqs: input.faqs ?? [],
-  };
-
-  const bodyHtml = await formatArticleToDocHtml(article);
-  const draft = await createWordPressDraft(article, bodyHtml);
-  return { id: draft.id, editLink: draft.editLink, link: draft.link, bodyHtml };
-}
-
 // Generates a featured-image thumbnail for an article: LLM scene -> Gemini
 // render -> upload to WP media library. Stores the media id + url + scene on the
 // article so the UI can show it and "Send to WordPress" can attach it. Returns
@@ -184,13 +157,6 @@ export async function redoArticleThumbnail(articleId: string, changeNote: string
 
   revalidatePath("/dashboard/articles");
   return { url, mediaId };
-}
-
-// Publishes a WordPress post live by id, with no database involved. Backs the
-// "Publish live" button on the /dashboard/wp-test harness.
-export async function publishPostToSiteById(postId: number) {
-  const { link } = await publishWordPressPost(postId);
-  return { link };
 }
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
