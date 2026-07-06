@@ -8,7 +8,7 @@ export default async function ArticlesPage() {
   const { data: articles } = await supabase
     .from("articles")
     .select(
-      "id, title, slug, status, created_at, scheduled_publish_at, originality_check, fact_check, clusters(name)"
+      "id, title, slug, status, created_at, scheduled_publish_at, originality_check, fact_check, wp_post_id, wp_edit_link, wp_status, thumbnail_url, clusters(name)"
     )
     .order("created_at", { ascending: false });
 
@@ -33,6 +33,10 @@ export default async function ArticlesPage() {
       factCheckNeedsReview: factCheck?.needs_review ?? false,
       scheduledPublishAt: a.scheduled_publish_at ?? null,
       ready: originalityOk && factCheckOk,
+      wpPostId: a.wp_post_id ?? null,
+      wpEditLink: a.wp_edit_link ?? null,
+      wpStatus: a.wp_status ?? null,
+      thumbnailUrl: a.thumbnail_url ?? null,
     };
   });
 

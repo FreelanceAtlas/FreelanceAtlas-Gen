@@ -3,3 +3,7 @@ node_modules
 .env
 .env.local
 .vercel
+
+# build artifacts
+tsconfig.tsbuildinfo
+next-env.d.ts

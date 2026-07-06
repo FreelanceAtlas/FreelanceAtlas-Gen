@@ -4,6 +4,9 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { scheduleArticle, unscheduleArticle, bulkDeleteArticles } from "@/app/dashboard/actions";
+import SendToWordPressButton from "@/components/SendToWordPressButton";
+import PublishToSiteButton from "@/components/PublishToSiteButton";
+import ThumbnailControl from "@/components/ThumbnailControl";
 
 export interface ArticleRow {
   id: string;
@@ -17,6 +20,10 @@ export interface ArticleRow {
   factCheckNeedsReview: boolean;
   scheduledPublishAt: string | null;
   ready: boolean;
+  wpPostId: number | null;
+  wpEditLink: string | null;
+  wpStatus: string | null;
+  thumbnailUrl: string | null;
 }
 
 function formatScheduled(iso: string) {
@@ -147,31 +154,43 @@ function ArticleRowItem({
   row,
   selected,
   onToggle,
+  showSchedule = true,
+  extraActions,
+  footer,
 }: {
   row: ArticleRow;
   selected: boolean;
   onToggle: () => void;
+  showSchedule?: boolean;
+  extraActions?: React.ReactNode;
+  footer?: React.ReactNode;
 }) {
   return (
-    <li className="flex items-center justify-between gap-4 px-5 py-3 text-sm">
-      <div className="flex min-w-0 items-center gap-3">
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={onToggle}
-          className="h-4 w-4 shrink-0 rounded border-atlasnavy/30"
-        />
-        <div className="min-w-0">
-          <Link href={`/dashboard/articles/${row.slug}`} className="font-medium text-atlasnavy hover:underline">
-            {row.title}
-          </Link>
-          <div className="mt-1 flex items-center gap-3">
-            <span className="text-xs text-atlasnavy/50">{row.clusterName}</span>
-            <ScoreBadges row={row} />
+    <li className="px-5 py-3 text-sm">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggle}
+            className="h-4 w-4 shrink-0 rounded border-atlasnavy/30"
+          />
+          <div className="min-w-0">
+            <Link href={`/dashboard/articles/${row.slug}`} className="font-medium text-atlasnavy hover:underline">
+              {row.title}
+            </Link>
+            <div className="mt-1 flex items-center gap-3">
+              <span className="text-xs text-atlasnavy/50">{row.clusterName}</span>
+              <ScoreBadges row={row} />
+            </div>
           </div>
         </div>
+        <div className="flex items-center gap-3">
+          {extraActions}
+          {showSchedule && <ScheduleControl row={row} />}
+        </div>
       </div>
-      <ScheduleControl row={row} />
+      {footer && <div className="mt-3 pl-7">{footer}</div>}
     </li>
   );
 }
@@ -182,12 +201,18 @@ function SelectableSection({
   rows,
   selected,
   setSelected,
+  showSchedule = true,
+  renderExtra,
+  renderFooter,
 }: {
   title: string;
   description: string;
   rows: ArticleRow[];
   selected: Set<string>;
   setSelected: (next: Set<string>) => void;
+  showSchedule?: boolean;
+  renderExtra?: (row: ArticleRow) => React.ReactNode;
+  renderFooter?: (row: ArticleRow) => React.ReactNode;
 }) {
   const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
 
@@ -224,7 +249,15 @@ function SelectableSection({
       </div>
       <ul className="mt-2 divide-y divide-atlasnavy/10 rounded-xl bg-white shadow-sm">
         {rows.map((row) => (
-          <ArticleRowItem key={row.id} row={row} selected={selected.has(row.id)} onToggle={() => toggleOne(row.id)} />
+          <ArticleRowItem
+            key={row.id}
+            row={row}
+            selected={selected.has(row.id)}
+            onToggle={() => toggleOne(row.id)}
+            showSchedule={showSchedule}
+            extraActions={renderExtra?.(row)}
+            footer={renderFooter?.(row)}
+          />
         ))}
         {rows.length === 0 && <li className="px-5 py-3 text-sm text-atlasnavy/50">None right now.</li>}
       </ul>
@@ -239,16 +272,22 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { ready, drafts, published } = useMemo(() => {
+  const { ready, pushedDraft, liveOnSite, drafts, published } = useMemo(() => {
     const ready: ArticleRow[] = [];
+    const pushedDraft: ArticleRow[] = [];
+    const liveOnSite: ArticleRow[] = [];
     const drafts: ArticleRow[] = [];
     const published: ArticleRow[] = [];
     for (const a of articles) {
-      if (a.status === "published") published.push(a);
+      // WordPress state takes priority over the internal gen status so an
+      // article that's been pushed to the site is grouped by where it lives now.
+      if (a.wpPostId && a.wpStatus === "published") liveOnSite.push(a);
+      else if (a.wpPostId) pushedDraft.push(a);
+      else if (a.status === "published") published.push(a);
       else if (a.ready) ready.push(a);
       else drafts.push(a);
     }
-    return { ready, drafts, published };
+    return { ready, pushedDraft, liveOnSite, drafts, published };
   }, [articles]);
 
   const selectedCount = selected.size;
@@ -326,10 +365,57 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
 
       <SelectableSection
         title="Ready to publish"
-        description="Passed both the originality and fact-check gates — just needs a click, or schedule it."
+        description="Passed both gates. Generate a thumbnail, then format & publish to WordPress."
         rows={ready}
         selected={selected}
         setSelected={setSelected}
+        renderExtra={(row) => <SendToWordPressButton articleId={row.id} compact />}
+        renderFooter={(row) => <ThumbnailControl articleId={row.id} thumbnailUrl={row.thumbnailUrl} />}
+      />
+
+      <SelectableSection
+        title="Pushed to site as draft"
+        description="Created as a draft on freelanceatlas.com. Review it in WP, then publish it live."
+        rows={pushedDraft}
+        selected={selected}
+        setSelected={setSelected}
+        showSchedule={false}
+        renderExtra={(row) => (
+          <div className="flex items-center gap-2">
+            {row.wpEditLink && (
+              <a
+                href={row.wpEditLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-md bg-atlasnavy/10 px-2 py-0.5 text-[11px] font-medium text-atlasnavy hover:bg-atlasnavy/20"
+              >
+                Open draft in WP
+              </a>
+            )}
+            <PublishToSiteButton articleId={row.id} compact />
+          </div>
+        )}
+      />
+
+      <SelectableSection
+        title="Live on site"
+        description="Published live on freelanceatlas.com."
+        rows={liveOnSite}
+        selected={selected}
+        setSelected={setSelected}
+        showSchedule={false}
+        renderExtra={(row) =>
+          row.wpEditLink ? (
+            <a
+              href={row.wpEditLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-md bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-200"
+            >
+              ✓ View in WP
+            </a>
+          ) : null
+        }
       />
 
       <SelectableSection

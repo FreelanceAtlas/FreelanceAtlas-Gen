@@ -14,6 +14,7 @@ export default function Sidebar() {
           <Link href="/dashboard/clusters" className="rounded-md px-3 py-2 hover:bg-atlassand">Clusters &amp; keywords</Link>
           <Link href="/dashboard/keyword-research" className="rounded-md px-3 py-2 hover:bg-atlassand">Keyword research</Link>
           <Link href="/dashboard/affiliate-links" className="rounded-md px-3 py-2 hover:bg-atlassand">Affiliate links</Link>
+          <Link href="/dashboard/wp-test" className="rounded-md px-3 py-2 hover:bg-atlassand">WP publish test</Link>
         </nav>
       </div>
       <form action={logout}>

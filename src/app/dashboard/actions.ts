@@ -5,6 +5,193 @@ import { revalidatePath } from "next/cache";
 import { checkOriginality, rewriteFlaggedPassages, ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import { factCheckArticle, FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 import { stripDashes } from "@/lib/textClean";
+import { formatArticleToDocHtml, createWordPressDraft, publishWordPressPost } from "@/lib/wordpress";
+import {
+  sceneForTitle,
+  renderThumbnail,
+  editThumbnail,
+  uploadThumbnailToWp,
+  fetchImageAsBase64,
+} from "@/lib/thumbnail";
+
+// Formats a ready article into the live theme's `.doc` HTML (via OpenRouter)
+// and pushes it to freelanceatlas.com as a WordPress DRAFT. Returns the WP
+// admin edit link so the editor can review/publish it there. Never publishes
+// automatically. Best-effort persists the WP post id/link onto the article row
+// so the UI can show "already sent" — silently ignored if those columns don't
+// exist yet.
+export async function sendArticleToWordPress(articleId: string) {
+  const supabase = createClient();
+  const { data: article, error } = await supabase
+    .from("articles")
+    .select("h1, title, meta_title, meta_description, slug, content_md, faqs")
+    .eq("id", articleId)
+    .single();
+
+  if (error || !article) throw new Error(error?.message ?? "Article not found.");
+
+  const bodyHtml = await formatArticleToDocHtml({
+    h1: article.h1 ?? "",
+    title: article.title ?? article.h1 ?? "",
+    meta_title: article.meta_title ?? "",
+    meta_description: article.meta_description ?? "",
+    slug: article.slug ?? "",
+    content_md: article.content_md ?? "",
+    faqs: (article.faqs as { question: string; answer: string }[]) ?? [],
+  });
+
+  // If a thumbnail was generated for this article, attach it as the featured image.
+  const { data: thumb } = await supabase
+    .from("articles")
+    .select("thumbnail_media_id")
+    .eq("id", articleId)
+    .single();
+
+  const draft = await createWordPressDraft(
+    {
+      h1: article.h1 ?? "",
+      title: article.title ?? article.h1 ?? "",
+      meta_title: article.meta_title ?? "",
+      meta_description: article.meta_description ?? "",
+      slug: article.slug ?? "",
+      content_md: article.content_md ?? "",
+      faqs: (article.faqs as { question: string; answer: string }[]) ?? [],
+    },
+    bodyHtml,
+    thumb?.thumbnail_media_id ?? null
+  );
+
+  // Record that we pushed it as a draft so the Articles tab can show it in the
+  // "Pushed to site as draft" section (requires the wp_* columns to exist).
+  await supabase
+    .from("articles")
+    .update({ wp_post_id: draft.id, wp_edit_link: draft.editLink, wp_status: "draft" })
+    .eq("id", articleId);
+
+  revalidatePath("/dashboard/articles");
+  revalidatePath(`/dashboard/articles/${article.slug}`);
+
+  return { id: draft.id, editLink: draft.editLink, link: draft.link };
+}
+
+// Publishes (makes live) an article that was already pushed to WordPress as a
+// draft. Reads the stored wp_post_id, flips the WP post to "publish", and marks
+// wp_status = "published" so the Articles tab moves it to the "Live on site"
+// section. Used by the "Publish live" button in the pushed-drafts section.
+export async function publishArticleToSite(articleId: string) {
+  const supabase = createClient();
+  const { data: article, error } = await supabase
+    .from("articles")
+    .select("slug, wp_post_id")
+    .eq("id", articleId)
+    .single();
+
+  if (error || !article) throw new Error(error?.message ?? "Article not found.");
+  if (!article.wp_post_id) throw new Error("This article has not been pushed to WordPress yet.");
+
+  const { link } = await publishWordPressPost(Number(article.wp_post_id));
+
+  await supabase.from("articles").update({ wp_status: "published" }).eq("id", articleId);
+
+  revalidatePath("/dashboard/articles");
+  revalidatePath(`/dashboard/articles/${article.slug}`);
+
+  return { link };
+}
+
+// Formats an article passed in directly (no database) and creates a WordPress
+// DRAFT from it. Used by the /dashboard/wp-test page to exercise the whole
+// format -> publish path without Supabase. Returns the WP admin edit link.
+export async function publishContentToWordPress(input: {
+  h1: string;
+  title: string;
+  meta_title: string;
+  meta_description: string;
+  slug: string;
+  content_md: string;
+  faqs: { question: string; answer: string }[];
+}) {
+  const article = {
+    h1: input.h1,
+    title: input.title || input.h1,
+    meta_title: input.meta_title,
+    meta_description: input.meta_description,
+    slug: input.slug,
+    content_md: input.content_md,
+    faqs: input.faqs ?? [],
+  };
+
+  const bodyHtml = await formatArticleToDocHtml(article);
+  const draft = await createWordPressDraft(article, bodyHtml);
+  return { id: draft.id, editLink: draft.editLink, link: draft.link, bodyHtml };
+}
+
+// Generates a featured-image thumbnail for an article: LLM scene -> Gemini
+// render -> upload to WP media library. Stores the media id + url + scene on the
+// article so the UI can show it and "Send to WordPress" can attach it. Returns
+// the thumbnail url.
+export async function generateArticleThumbnail(articleId: string) {
+  const supabase = createClient();
+  const { data: article, error } = await supabase
+    .from("articles")
+    .select("title, h1, slug")
+    .eq("id", articleId)
+    .single();
+  if (error || !article) throw new Error(error?.message ?? "Article not found.");
+
+  const title = article.title || article.h1 || "";
+  const scene = await sceneForTitle(title);
+  const png = await renderThumbnail(scene);
+  const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
+
+  await supabase
+    .from("articles")
+    .update({ thumbnail_media_id: mediaId, thumbnail_url: url, thumbnail_scene: JSON.stringify(scene) })
+    .eq("id", articleId);
+
+  revalidatePath("/dashboard/articles");
+  return { url, mediaId };
+}
+
+// Redoes an article's thumbnail from a change note: pulls the last generated
+// image, sends it plus the note to Gemini for a revision, uploads the result,
+// and updates the stored thumbnail. Returns the new url.
+export async function redoArticleThumbnail(articleId: string, changeNote: string) {
+  if (!changeNote?.trim()) throw new Error("Add a change note describing what to adjust.");
+  const supabase = createClient();
+  const { data: article, error } = await supabase
+    .from("articles")
+    .select("title, h1, slug, thumbnail_url, thumbnail_scene")
+    .eq("id", articleId)
+    .single();
+  if (error || !article) throw new Error(error?.message ?? "Article not found.");
+  if (!article.thumbnail_url) throw new Error("Generate a thumbnail first before redoing it.");
+
+  const title = article.title || article.h1 || "";
+  let header = title;
+  try {
+    header = JSON.parse(article.thumbnail_scene || "{}").header || title;
+  } catch {}
+
+  const prev = await fetchImageAsBase64(article.thumbnail_url);
+  const png = await editThumbnail(prev, changeNote, header);
+  const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
+
+  await supabase
+    .from("articles")
+    .update({ thumbnail_media_id: mediaId, thumbnail_url: url })
+    .eq("id", articleId);
+
+  revalidatePath("/dashboard/articles");
+  return { url, mediaId };
+}
+
+// Publishes a WordPress post live by id, with no database involved. Backs the
+// "Publish live" button on the /dashboard/wp-test harness.
+export async function publishPostToSiteById(postId: number) {
+  const { link } = await publishWordPressPost(postId);
+  return { link };
+}
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
   const supabase = createClient();

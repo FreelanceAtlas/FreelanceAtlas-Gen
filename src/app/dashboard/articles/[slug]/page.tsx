@@ -7,6 +7,8 @@ import { FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 import StatusControl from "@/components/StatusControl";
 import RecheckControl from "@/components/RecheckControl";
 import EditArticleControl from "@/components/EditArticleControl";
+import SendToWordPressButton from "@/components/SendToWordPressButton";
+import PublishToSiteButton from "@/components/PublishToSiteButton";
 
 export default async function ArticleDetail({ params }: { params: { slug: string } }) {
   const supabase = createClient();
@@ -65,6 +67,34 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         <div>
           <StatusControl articleId={article.id} status={article.status} />
           <RecheckControl articleId={article.id} hasFlaggedIssues={hasFlaggedIssues} />
+          <div className="mt-2 flex flex-col items-end gap-2">
+            {!article.wp_post_id && <SendToWordPressButton articleId={article.id} />}
+            {article.wp_post_id && article.wp_status !== "published" && (
+              <>
+                {article.wp_edit_link && (
+                  <a
+                    href={article.wp_edit_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-md bg-atlasnavy/10 px-3 py-1.5 text-xs font-medium text-atlasnavy hover:bg-atlasnavy/20"
+                  >
+                    Open draft in WP
+                  </a>
+                )}
+                <PublishToSiteButton articleId={article.id} />
+              </>
+            )}
+            {article.wp_post_id && article.wp_status === "published" && article.wp_edit_link && (
+              <a
+                href={article.wp_edit_link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-md bg-emerald-100 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-200"
+              >
+                ✓ Live on site — view in WP
+              </a>
+            )}
+          </div>
         </div>
       </div>
 
