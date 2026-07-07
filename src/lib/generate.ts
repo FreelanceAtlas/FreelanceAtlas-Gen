@@ -1391,13 +1391,15 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
   return { article: redactUnverifiedFiguresFromArticle(article, fetchedSources), fetchedSources };
 }
 
-// ── Redo: whole-article regeneration for a failing draft ─────────────────────
-// Unlike rewriteFlaggedPassages (originality) which surgically edits only the
-// flagged spans, this rewrites the ENTIRE article body in the model's own words
-// while fixing the specific originality and/or fact-check problems that made the
-// draft fail its gates. Used by the "Redo with AI" action on drafts. Fail-soft:
-// on any failure it returns the original contentMd unchanged and rewritten:false,
-// so the caller never persists corrupted or truncated output.
+// ── Redo: targeted fix of a failing draft's flagged issues ───────────────────
+// Surgically fixes only the passages/claims the originality + fact-check flagged,
+// leaving everything else verbatim (a full rewrite was introducing new issues and
+// lowering the score). Crucially, it runs with web_fetch enabled so the model can
+// pull the actual source pages to verify/correct specific figures, and it returns
+// the fetched page text so the caller can re-score the fact-check against ground
+// truth (without it, every specific number gets flagged "unverifiable"). Also
+// fixes the FAQs, which the fact-check scores too. Fail-soft: on any failure it
+// returns the original content/faqs unchanged with rewritten:false.
 export interface RedoOriginalityIssue {
   excerpt: string;
   likely_source: string;
@@ -1412,7 +1414,7 @@ export interface RedoFactIssue {
 
 const REDO_TOOL = {
   name: "submit_fixed_article",
-  description: "Submit the full article body with ONLY the flagged passages fixed.",
+  description: "Submit the full article body + FAQs with ONLY the flagged passages/claims fixed.",
   input_schema: {
     type: "object" as const,
     properties: {
@@ -1420,25 +1422,49 @@ const REDO_TOOL = {
         type: "string",
         description:
           "The COMPLETE article body in markdown, identical to the original EXCEPT that the flagged " +
-          "originality passages have been reworded and the flagged inaccurate claims corrected or " +
-          "removed. Every sentence, heading, and list item that was NOT flagged must be reproduced " +
-          "verbatim, unchanged.",
+          "originality passages have been reworded and the flagged inaccurate claims corrected " +
+          "(to a web_fetch-verified value) or removed. Every sentence, heading, and list item that " +
+          "was NOT flagged must be reproduced verbatim, unchanged.",
+      },
+      faqs: {
+        type: "array",
+        description:
+          "The full FAQ list, identical to the input EXCEPT that any flagged FAQ answer has been " +
+          "corrected/removed the same way. Reproduce unflagged FAQs verbatim. Return the same number " +
+          "of FAQs in the same order.",
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            answer: { type: "string" },
+          },
+          required: ["question", "answer"],
+        },
       },
     },
-    required: ["content_md"],
+    required: ["content_md", "faqs"],
   },
 };
 
 export async function regenerateDraftBody(input: {
   contentMd: string;
+  faqs: { question: string; answer: string }[];
   sources: { url: string; title: string; publishedDate?: string }[];
   originalityIssues: RedoOriginalityIssue[];
   factIssues: RedoFactIssue[];
-}): Promise<{ content_md: string; rewritten: boolean; error?: string }> {
+}): Promise<{
+  content_md: string;
+  faqs: { question: string; answer: string }[];
+  fetchedSources: Record<string, string>;
+  rewritten: boolean;
+  error?: string;
+}> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return {
       content_md: input.contentMd,
+      faqs: input.faqs,
+      fetchedSources: {},
       rewritten: false,
       error: "ANTHROPIC_API_KEY is not configured, so the redo could not run.",
     };
@@ -1460,39 +1486,55 @@ export async function regenerateDraftBody(input: {
         .join("\n\n")
     : "None flagged.";
 
+  const faqBlock = input.faqs.length
+    ? input.faqs.map((f, n) => `${n + 1}. Q: ${f.question}\n   A: ${f.answer}`).join("\n\n")
+    : "(no FAQs)";
+
   const systemPrompt = `You are a senior editor fixing the SPECIFIC problems an automated check flagged
-on a FreelanceAtlas article. You will get the full article body plus an exact list of flagged
+on a FreelanceAtlas article. You will get the full article body, its FAQs, and an exact list of flagged
 passages/claims. Fix ONLY those flagged items. This is a surgical edit, not a rewrite.
 
-CRITICAL: Reproduce every sentence, heading, and list item that was NOT flagged completely unchanged,
-verbatim. Do not "improve", re-order, or re-word anything that wasn't flagged. Changing unflagged text
-risks introducing NEW problems and lowering the score, which is the opposite of the goal.
+CRITICAL: Reproduce every sentence, heading, list item, and FAQ that was NOT flagged completely
+unchanged, verbatim. Do not "improve", re-order, or re-word anything that wasn't flagged. Changing
+unflagged text risks introducing NEW problems and lowering the score, which is the opposite of the goal.
+
+VERIFY FIGURES WITH web_fetch: For any flagged FACTUAL claim that involves a specific number, price,
+percentage, plan name, or feature (very common on the pricing pages in the sources), you MUST call
+web_fetch on the relevant source URL and use the ACTUAL value from the fetched page. Fetch the vendor's
+own pricing page (e.g. asana.com/pricing, trello.com/pricing, clickup.com/pricing) for prices. Then
+either correct the claim to the fetched value, or if the page genuinely doesn't support any specific
+figure, remove the number and state it qualitatively. NEVER keep or invent a figure you did not verify
+against fetched text. A flagged claim's concern often says "no fetched source text available" — the fix
+is to actually fetch it now.
 
 For each ORIGINALITY passage: reword just that passage so it is no longer a verbatim or near-verbatim
 copy of the source, keeping the same fact/point and roughly the same length, fitting the surrounding
 structure.
 
-For each FACTUAL claim: correct it to what the listed sources actually support, or if no source
-supports the specific figure, remove that figure and state it qualitatively (e.g. "many platforms
-charge a fee" instead of an invented amount). Never invent a number, price, percentage, or date.
+Fix flagged FAQ answers the same way (verify figures via web_fetch, correct or qualify). Keep the same
+FAQs in the same order.
 
-Do not add an H1. Never use em dashes, spaced hyphens, or double hyphens as dashes. Call
-submit_fixed_article exactly once with the full body (fixed passages changed, everything else verbatim).
-Do not respond with plain text.`;
+Do not add an H1. Never use em dashes, spaced hyphens, or double hyphens as dashes. Once every flagged
+item is fixed, call submit_fixed_article exactly once with the full body and full FAQ list. Do not
+respond with plain text.`;
 
-  const userPrompt = `SOURCES THE ARTICLE WAS RESEARCHED FROM:
+  const userPrompt = `SOURCES THE ARTICLE WAS RESEARCHED FROM (fetch these to verify figures):
 ${sourceBlock}
 
 FULL ARTICLE BODY (change ONLY the flagged passages below; reproduce everything else verbatim):
 ${input.contentMd}
 
+CURRENT FAQS (fix only flagged ones; reproduce the rest verbatim, same order):
+${faqBlock}
+
 FLAGGED ORIGINALITY PASSAGES TO REWORD:
 ${originalityBlock}
 
-FLAGGED FACTUAL CLAIMS TO CORRECT OR REMOVE:
+FLAGGED FACTUAL CLAIMS TO CORRECT (via web_fetch) OR REMOVE:
 ${factBlock}
 
-Return the full article body with only these flagged items fixed, by calling submit_fixed_article.`;
+web_fetch the source pages to verify every flagged figure, then return the full fixed article and FAQs
+by calling submit_fixed_article.`;
 
   let res: Response;
   try {
@@ -1505,39 +1547,81 @@ Return the full article body with only these flagged items fixed, by calling sub
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 8192,
+        // web_fetch pages count against the output budget alongside the article,
+        // so this needs the same headroom as generation, not the 8k of a plain edit.
+        max_tokens: 20000,
         system: systemPrompt,
-        tools: [REDO_TOOL],
-        tool_choice: { type: "tool", name: "submit_fixed_article" },
+        tools: [
+          // Same server tool + shape generation uses, so extractFetchedSourceText
+          // can recover the fetched page text for the fact-check re-score.
+          { type: "web_fetch_20250910", name: "web_fetch", max_uses: 6, citations: { enabled: true } },
+          REDO_TOOL,
+        ],
+        // Auto (not forced) so the model can web_fetch to verify figures first,
+        // then call submit_fixed_article once everything flagged is fixed.
         messages: [{ role: "user", content: userPrompt }],
       }),
-      signal: AbortSignal.timeout(180000),
+      signal: AbortSignal.timeout(240000),
     });
   } catch (err: any) {
     const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
     return {
       content_md: input.contentMd,
+      faqs: input.faqs,
+      fetchedSources: {},
       rewritten: false,
       error: timedOut
-        ? "Redo request timed out after 180s."
+        ? "Redo request timed out after 240s (likely a slow source fetch)."
         : `Redo request failed before completing: ${String(err?.message ?? err)}`,
     };
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    return { content_md: input.contentMd, rewritten: false, error: `Redo request failed (${res.status}): ${text.slice(0, 200)}` };
+    return {
+      content_md: input.contentMd,
+      faqs: input.faqs,
+      fetchedSources: {},
+      rewritten: false,
+      error: `Redo request failed (${res.status}): ${text.slice(0, 200)}`,
+    };
   }
 
   const data = await res.json();
   if (data.stop_reason === "max_tokens") {
-    return { content_md: input.contentMd, rewritten: false, error: "Redo was cut off because it exceeded the model's output limit." };
+    return {
+      content_md: input.contentMd,
+      faqs: input.faqs,
+      fetchedSources: {},
+      rewritten: false,
+      error: "Redo was cut off because it exceeded the model's output limit.",
+    };
   }
 
-  const toolUse = (data.content ?? []).find((b: any) => b.type === "tool_use");
+  const fetchedSources = extractFetchedSourceText(data.content);
+  const toolUse = (data.content ?? []).find(
+    (b: any) => b.type === "tool_use" && b.name === "submit_fixed_article"
+  );
   if (!toolUse || typeof toolUse.input?.content_md !== "string" || !toolUse.input.content_md.trim()) {
-    return { content_md: input.contentMd, rewritten: false, error: "The redo model did not return a structured tool call." };
+    return {
+      content_md: input.contentMd,
+      faqs: input.faqs,
+      fetchedSources,
+      rewritten: false,
+      error: "The redo model did not return a structured tool call.",
+    };
   }
 
-  return { content_md: stripDashes(toolUse.input.content_md), rewritten: true };
+  const fixedFaqs = Array.isArray(toolUse.input.faqs)
+    ? toolUse.input.faqs
+        .filter((f: any) => f && typeof f.question === "string" && typeof f.answer === "string")
+        .map((f: any) => ({ question: stripDashes(f.question), answer: stripDashes(f.answer) }))
+    : input.faqs;
+
+  return {
+    content_md: stripDashes(toolUse.input.content_md),
+    faqs: fixedFaqs.length ? fixedFaqs : input.faqs,
+    fetchedSources,
+    rewritten: true,
+  };
 }

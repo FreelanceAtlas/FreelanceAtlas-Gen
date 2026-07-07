@@ -13,12 +13,7 @@ import {
   uploadThumbnailToWp,
   fetchImageAsBase64,
 } from "@/lib/thumbnail";
-import {
-  regenerateDraftBody,
-  redactFiguresFlaggedByFactCheck,
-  redactDescriptiveClaimsFlaggedByFactCheck,
-  type GeneratedArticle,
-} from "@/lib/generate";
+import { regenerateDraftBody } from "@/lib/generate";
 
 // Formats a ready article into the live theme's `.doc` HTML (via OpenRouter)
 // and pushes it to freelanceatlas.com as a WordPress DRAFT. Returns the WP
@@ -529,13 +524,17 @@ export async function redoDraftArticle(articleId: string): Promise<{
   const oldFact = factCheck?.accuracy_score ?? 0;
 
   let cleanedContent: string;
+  let fixedFaqs: { question: string; answer: string }[];
+  let fetchedSources: Record<string, string>;
   try {
-    // Targeted fix: hand the model the article plus the EXACT flagged issues and
-    // have it change only those passages/claims, leaving the rest verbatim. (A
-    // full-article regeneration was introducing brand-new issues and lowering the
-    // score, which is why this is surgical, not a rewrite.)
+    // Targeted fix: hand the model the article + FAQs + the EXACT flagged issues
+    // and have it change only those, leaving the rest verbatim. It runs with
+    // web_fetch so it can pull the real source/pricing pages to correct figures,
+    // and returns the fetched page text so the fact-check re-score below can verify
+    // numbers against ground truth instead of blanket-flagging them "unverifiable".
     const redo = await regenerateDraftBody({
       contentMd: article.content_md ?? "",
+      faqs,
       sources,
       originalityIssues: originalityFailing ? originality?.issues ?? [] : [],
       factIssues: factFailing ? factCheck?.issues ?? [] : [],
@@ -545,35 +544,20 @@ export async function redoDraftArticle(articleId: string): Promise<{
       throw new Error(redo.error ?? "Redo did not produce a rewrite.");
     }
     cleanedContent = stripDashes(redo.content_md);
-
-    // Deterministic backstop: strip/qualify any flagged figures the model didn't
-    // fully remove, keyed off the exact fact-check issues (same logic generation
-    // uses). Only touches flagged numbers, so it can't regress unflagged text.
-    if (factFailing && (factCheck?.issues?.length ?? 0) > 0) {
-      const asArticle: GeneratedArticle = {
-        title: "",
-        meta_title: "",
-        meta_description: "",
-        h1: "",
-        content_md: cleanedContent,
-        faqs: [],
-        keywords_used: [],
-        keyword_usage: [],
-      };
-      const figured = redactFiguresFlaggedByFactCheck(asArticle, factCheck!.issues!, {}, "");
-      const descRedacted = redactDescriptiveClaimsFlaggedByFactCheck(figured, factCheck!.issues!);
-      cleanedContent = stripDashes(descRedacted.content_md);
-    }
+    fixedFaqs = redo.faqs;
+    fetchedSources = redo.fetchedSources;
   } catch (e) {
     await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
     revalidatePath("/dashboard/articles");
     throw e;
   }
 
-  // Re-score both checks neutrally against the fixed content.
+  // Re-score both checks neutrally against the fixed content. Crucially, the
+  // fact-check gets the freshly fetched source text so verified figures aren't
+  // flagged as unverifiable (the reason redo previously couldn't raise the score).
   const [originalityCheck, newFactCheck] = await Promise.all([
     checkOriginality(cleanedContent, sources),
-    factCheckArticle(cleanedContent, faqs, sources),
+    factCheckArticle(cleanedContent, fixedFaqs, sources, fetchedSources),
   ]);
 
   const nowOriginalityOk =
@@ -603,6 +587,7 @@ export async function redoDraftArticle(articleId: string): Promise<{
     .from("articles")
     .update({
       content_md: cleanedContent,
+      faqs: fixedFaqs,
       originality_check: originalityCheck,
       fact_check: newFactCheck,
       redo_status: null,
