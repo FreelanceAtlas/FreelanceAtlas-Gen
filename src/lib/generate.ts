@@ -1412,67 +1412,48 @@ export interface RedoFactIssue {
   severity: "low" | "medium" | "high";
 }
 
-const REDO_TOOL = {
-  name: "submit_fixed_article",
-  description: "Submit the full article body + FAQs with ONLY the flagged passages/claims fixed.",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      content_md: {
-        type: "string",
-        description:
-          "The COMPLETE article body in markdown, identical to the original EXCEPT that the flagged " +
-          "originality passages have been reworded and the flagged inaccurate claims corrected " +
-          "(to a web_fetch-verified value) or removed. Every sentence, heading, and list item that " +
-          "was NOT flagged must be reproduced verbatim, unchanged.",
-      },
-      faqs: {
-        type: "array",
-        description:
-          "The full FAQ list, identical to the input EXCEPT that any flagged FAQ answer has been " +
-          "corrected/removed the same way. Reproduce unflagged FAQs verbatim. Return the same number " +
-          "of FAQs in the same order.",
-        items: {
-          type: "object",
-          properties: {
-            question: { type: "string" },
-            answer: { type: "string" },
-          },
-          required: ["question", "answer"],
-        },
-      },
-    },
-    required: ["content_md", "faqs"],
-  },
-};
+function extractRedoJson(raw: string): { content_md?: string; faqs?: any } | null {
+  let s = (raw ?? "").trim();
+  s = s.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  const a = s.indexOf("{");
+  const b = s.lastIndexOf("}");
+  if (a === -1 || b === -1 || b <= a) return null;
+  try {
+    return JSON.parse(s.slice(a, b + 1));
+  } catch {
+    return null;
+  }
+}
 
+// Targeted fix via OpenRouter (claude-sonnet-4.5). The caller pre-fetches the
+// source pages server-side (fetchSourcesText) and passes the text in as ground
+// truth — Anthropic's web_fetch could not extract prices from the JS-rendered
+// vendor pages, which is why figures stayed "unverifiable". With the real page
+// text supplied here, the model corrects each flagged figure to the actual value.
 export async function regenerateDraftBody(input: {
   contentMd: string;
   faqs: { question: string; answer: string }[];
   sources: { url: string; title: string; publishedDate?: string }[];
   originalityIssues: RedoOriginalityIssue[];
   factIssues: RedoFactIssue[];
+  fetchedSources: Record<string, string>;
 }): Promise<{
   content_md: string;
   faqs: { question: string; answer: string }[];
-  fetchedSources: Record<string, string>;
   rewritten: boolean;
   error?: string;
 }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     return {
       content_md: input.contentMd,
       faqs: input.faqs,
-      fetchedSources: {},
       rewritten: false,
-      error: "ANTHROPIC_API_KEY is not configured, so the redo could not run.",
+      error: "OPENROUTER_API_KEY is not configured, so the redo could not run.",
     };
   }
 
-  const sourceBlock = input.sources.length
-    ? input.sources.map((s) => `- ${s.title} (${s.publishedDate ?? "date unknown"}): ${s.url}`).join("\n")
-    : "No sources were supplied — keep claims general and use no invented statistics.";
+  const model = process.env.OPENROUTER_REDO_MODEL || "anthropic/claude-sonnet-4.5";
 
   const originalityBlock = input.originalityIssues.length
     ? input.originalityIssues
@@ -1486,142 +1467,101 @@ export async function regenerateDraftBody(input: {
         .join("\n\n")
     : "None flagged.";
 
-  const faqBlock = input.faqs.length
-    ? input.faqs.map((f, n) => `${n + 1}. Q: ${f.question}\n   A: ${f.answer}`).join("\n\n")
-    : "(no FAQs)";
+  const fetchedEntries = Object.entries(input.fetchedSources ?? {});
+  const fetchedBlock = fetchedEntries.length
+    ? fetchedEntries.map(([url, text]) => `=== FETCHED TEXT FOR ${url} ===\n${text}`).join("\n\n").slice(0, 90000)
+    : "(no source pages could be fetched — do not keep any specific unverifiable figure; state it qualitatively)";
 
-  const systemPrompt = `You are a senior editor fixing the SPECIFIC problems an automated check flagged
-on a FreelanceAtlas article. You will get the full article body, its FAQs, and an exact list of flagged
-passages/claims. Fix ONLY those flagged items. This is a surgical edit, not a rewrite.
+  const systemPrompt = `You are a senior editor fixing the SPECIFIC problems an automated check flagged on a
+FreelanceAtlas article. You get the full article body, its FAQs, the flagged issues, and the ACTUAL
+FETCHED TEXT of the source pages. Fix ONLY the flagged items. This is a surgical edit, not a rewrite.
 
 CRITICAL: Reproduce every sentence, heading, list item, and FAQ that was NOT flagged completely
-unchanged, verbatim. Do not "improve", re-order, or re-word anything that wasn't flagged. Changing
-unflagged text risks introducing NEW problems and lowering the score, which is the opposite of the goal.
+unchanged, verbatim. Do not "improve", re-order, or re-word anything that wasn't flagged — that risks
+introducing NEW problems and lowering the score.
 
-VERIFY FIGURES WITH web_fetch: For any flagged FACTUAL claim that involves a specific number, price,
-percentage, plan name, or feature (very common on the pricing pages in the sources), you MUST call
-web_fetch on the relevant source URL and use the ACTUAL value from the fetched page. Fetch the vendor's
-own pricing page (e.g. asana.com/pricing, trello.com/pricing, clickup.com/pricing) for prices. Then
-either correct the claim to the fetched value, or if the page genuinely doesn't support any specific
-figure, remove the number and state it qualitatively. NEVER keep or invent a figure you did not verify
-against fetched text. A flagged claim's concern often says "no fetched source text available" — the fix
-is to actually fetch it now.
+USE THE FETCHED TEXT AS GROUND TRUTH: For every flagged factual claim with a number, price, percentage,
+plan name, or feature, find the correct value in the FETCHED TEXT and correct the claim to match it
+exactly. If the fetched text genuinely does not contain any figure for that claim, remove the specific
+number and state it qualitatively (e.g. "a modest per-user fee"). NEVER keep or invent a figure that
+the fetched text does not support. Make the article body and the FAQ answers agree with each other.
 
 For each ORIGINALITY passage: reword just that passage so it is no longer a verbatim or near-verbatim
-copy of the source, keeping the same fact/point and roughly the same length, fitting the surrounding
-structure.
+copy of the source, keeping the same fact/point and roughly the same length.
 
-Fix flagged FAQ answers the same way (verify figures via web_fetch, correct or qualify). Keep the same
-FAQs in the same order.
+Do not add an H1. Never use em dashes, spaced hyphens, or double hyphens as dashes. Respond with ONLY a
+JSON object, no prose, no code fence: {"content_md": "<full fixed markdown body>", "faqs": [{"question":
+"...", "answer": "..."}]} with the FAQs in the same order and count as the input.`;
 
-Do not add an H1. Never use em dashes, spaced hyphens, or double hyphens as dashes. Once every flagged
-item is fixed, call submit_fixed_article exactly once with the full body and full FAQ list. Do not
-respond with plain text.`;
+  const userPrompt = `FETCHED SOURCE TEXT (ground truth for every figure):
+${fetchedBlock}
 
-  const userPrompt = `SOURCES THE ARTICLE WAS RESEARCHED FROM (fetch these to verify figures):
-${sourceBlock}
-
-FULL ARTICLE BODY (change ONLY the flagged passages below; reproduce everything else verbatim):
+FULL ARTICLE BODY (change ONLY the flagged passages; reproduce everything else verbatim):
 ${input.contentMd}
 
 CURRENT FAQS (fix only flagged ones; reproduce the rest verbatim, same order):
-${faqBlock}
+${JSON.stringify(input.faqs)}
 
 FLAGGED ORIGINALITY PASSAGES TO REWORD:
 ${originalityBlock}
 
-FLAGGED FACTUAL CLAIMS TO CORRECT (via web_fetch) OR REMOVE:
+FLAGGED FACTUAL CLAIMS TO CORRECT (against the fetched text) OR REMOVE:
 ${factBlock}
 
-web_fetch the source pages to verify every flagged figure, then return the full fixed article and FAQs
-by calling submit_fixed_article.`;
+Return ONLY the JSON object with the full fixed content_md and faqs.`;
 
   let res: Response;
   try {
-    res = await fetch("https://api.anthropic.com/v1/messages", {
+    res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": "https://freelanceatlas.com",
+        "X-Title": "FreelanceAtlas-Gen",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        // web_fetch pages count against the output budget alongside the article,
-        // so this needs the same headroom as generation, not the 8k of a plain edit.
-        max_tokens: 20000,
-        system: systemPrompt,
-        tools: [
-          // Same server tool + shape generation uses, so extractFetchedSourceText
-          // can recover the fetched page text for the fact-check re-score.
-          { type: "web_fetch_20250910", name: "web_fetch", max_uses: 6, citations: { enabled: true } },
-          REDO_TOOL,
+        model,
+        max_tokens: 16000,
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
         ],
-        // Auto (not forced) so the model can web_fetch to verify figures first,
-        // then call submit_fixed_article once everything flagged is fixed.
-        messages: [{ role: "user", content: userPrompt }],
       }),
-      signal: AbortSignal.timeout(240000),
+      signal: AbortSignal.timeout(180000),
     });
   } catch (err: any) {
     const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
     return {
       content_md: input.contentMd,
       faqs: input.faqs,
-      fetchedSources: {},
       rewritten: false,
-      error: timedOut
-        ? "Redo request timed out after 240s (likely a slow source fetch)."
-        : `Redo request failed before completing: ${String(err?.message ?? err)}`,
+      error: timedOut ? "Redo request timed out after 180s." : `Redo request failed: ${String(err?.message ?? err)}`,
     };
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    return {
-      content_md: input.contentMd,
-      faqs: input.faqs,
-      fetchedSources: {},
-      rewritten: false,
-      error: `Redo request failed (${res.status}): ${text.slice(0, 200)}`,
-    };
+    return { content_md: input.contentMd, faqs: input.faqs, rewritten: false, error: `Redo request failed (${res.status}): ${text.slice(0, 200)}` };
   }
 
   const data = await res.json();
-  if (data.stop_reason === "max_tokens") {
-    return {
-      content_md: input.contentMd,
-      faqs: input.faqs,
-      fetchedSources: {},
-      rewritten: false,
-      error: "Redo was cut off because it exceeded the model's output limit.",
-    };
+  const content: string = data?.choices?.[0]?.message?.content ?? "";
+  const parsed = extractRedoJson(content);
+  if (!parsed || typeof parsed.content_md !== "string" || !parsed.content_md.trim()) {
+    return { content_md: input.contentMd, faqs: input.faqs, rewritten: false, error: "The redo model did not return usable JSON." };
   }
 
-  const fetchedSources = extractFetchedSourceText(data.content);
-  const toolUse = (data.content ?? []).find(
-    (b: any) => b.type === "tool_use" && b.name === "submit_fixed_article"
-  );
-  if (!toolUse || typeof toolUse.input?.content_md !== "string" || !toolUse.input.content_md.trim()) {
-    return {
-      content_md: input.contentMd,
-      faqs: input.faqs,
-      fetchedSources,
-      rewritten: false,
-      error: "The redo model did not return a structured tool call.",
-    };
-  }
-
-  const fixedFaqs = Array.isArray(toolUse.input.faqs)
-    ? toolUse.input.faqs
+  const fixedFaqs = Array.isArray(parsed.faqs)
+    ? parsed.faqs
         .filter((f: any) => f && typeof f.question === "string" && typeof f.answer === "string")
         .map((f: any) => ({ question: stripDashes(f.question), answer: stripDashes(f.answer) }))
     : input.faqs;
 
   return {
-    content_md: stripDashes(toolUse.input.content_md),
+    content_md: stripDashes(parsed.content_md),
     faqs: fixedFaqs.length ? fixedFaqs : input.faqs,
-    fetchedSources,
     rewritten: true,
   };
 }

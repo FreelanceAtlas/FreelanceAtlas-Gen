@@ -14,6 +14,7 @@ import {
   fetchImageAsBase64,
 } from "@/lib/thumbnail";
 import { regenerateDraftBody } from "@/lib/generate";
+import { fetchSourcesText } from "@/lib/fetchSourceText";
 
 // Formats a ready article into the live theme's `.doc` HTML (via OpenRouter)
 // and pushes it to freelanceatlas.com as a WordPress DRAFT. Returns the WP
@@ -527,17 +528,22 @@ export async function redoDraftArticle(articleId: string): Promise<{
   let fixedFaqs: { question: string; answer: string }[];
   let fetchedSources: Record<string, string>;
   try {
-    // Targeted fix: hand the model the article + FAQs + the EXACT flagged issues
-    // and have it change only those, leaving the rest verbatim. It runs with
-    // web_fetch so it can pull the real source/pricing pages to correct figures,
-    // and returns the fetched page text so the fact-check re-score below can verify
-    // numbers against ground truth instead of blanket-flagging them "unverifiable".
+    // Fetch the source pages server-side (browser UA) so we have the ACTUAL page
+    // text — Anthropic's web_fetch couldn't extract prices from JS-rendered vendor
+    // pages, leaving every figure "unverifiable". This text is the ground truth for
+    // both the fix and the re-score below.
+    fetchedSources = await fetchSourcesText(sources);
+
+    // Targeted fix (OpenRouter / claude-sonnet-4.5): correct the flagged figures to
+    // the values actually present in the fetched text, reword flagged originality
+    // passages, fix flagged FAQs, and leave everything else verbatim.
     const redo = await regenerateDraftBody({
       contentMd: article.content_md ?? "",
       faqs,
       sources,
       originalityIssues: originalityFailing ? originality?.issues ?? [] : [],
       factIssues: factFailing ? factCheck?.issues ?? [] : [],
+      fetchedSources,
     });
 
     if (!redo.rewritten) {
@@ -545,7 +551,6 @@ export async function redoDraftArticle(articleId: string): Promise<{
     }
     cleanedContent = stripDashes(redo.content_md);
     fixedFaqs = redo.faqs;
-    fetchedSources = redo.fetchedSources;
   } catch (e) {
     await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
     revalidatePath("/dashboard/articles");
