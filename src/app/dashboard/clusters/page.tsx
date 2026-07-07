@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import KeywordStatusControl from "@/components/KeywordStatusControl";
 
@@ -5,6 +6,25 @@ export default async function ClustersPage() {
   const supabase = createClient();
   const { data: clusters } = await supabase.from("clusters").select("*").order("name");
   const { data: keywords } = await supabase.from("keywords").select("*").order("is_used");
+
+  // A keyword is marked is_used=true when a draft is generated with it, but the
+  // link to *which* article isn't stored on the keyword row. Each article's
+  // keyword_table lists every keyword it actually used, so build a
+  // keyword -> article(s) map from there to show where each used keyword landed.
+  const { data: articles } = await supabase.from("articles").select("id, title, slug, keyword_table");
+  const usedOn = new Map<string, { title: string; slug: string }[]>();
+  for (const a of articles ?? []) {
+    const table = Array.isArray(a.keyword_table) ? a.keyword_table : [];
+    for (const entry of table) {
+      for (const key of [entry?.keyword, entry?.usedAs, entry?.used_as]) {
+        if (typeof key !== "string" || !key.trim()) continue;
+        const norm = key.trim().toLowerCase();
+        const refs = usedOn.get(norm) ?? [];
+        if (!refs.some((r) => r.slug === a.slug)) refs.push({ title: a.title, slug: a.slug });
+        usedOn.set(norm, refs);
+      }
+    }
+  }
 
   return (
     <div>
@@ -33,15 +53,39 @@ export default async function ClustersPage() {
               <tbody>
                 {(keywords ?? [])
                   .filter((k) => k.cluster_id === c.id)
-                  .map((k) => (
-                    <tr key={k.id} className="border-t border-atlasnavy/5">
-                      <td className="py-1 text-blue-600 font-medium">{k.keyword}</td>
-                      <td className="py-1 capitalize">{k.search_intent}</td>
-                      <td className="py-1">
-                        <KeywordStatusControl keywordId={k.id} isUsed={!!k.is_used} />
-                      </td>
-                    </tr>
-                  ))}
+                  .map((k) => {
+                    const refs = usedOn.get((k.keyword ?? "").trim().toLowerCase()) ?? [];
+                    return (
+                      <tr key={k.id} className="border-t border-atlasnavy/5">
+                        <td className="py-1 text-blue-600 font-medium align-top">{k.keyword}</td>
+                        <td className="py-1 capitalize align-top">{k.search_intent}</td>
+                        <td className="py-1 align-top">
+                          <KeywordStatusControl keywordId={k.id} isUsed={!!k.is_used} />
+                          {k.is_used &&
+                            (refs.length > 0 ? (
+                              <div className="mt-1 text-[11px] text-atlasnavy/50">
+                                Used on:{" "}
+                                {refs.map((r, i) => (
+                                  <span key={r.slug}>
+                                    {i > 0 && ", "}
+                                    <Link
+                                      href={`/dashboard/articles/${r.slug}`}
+                                      className="underline hover:text-atlasnavy"
+                                    >
+                                      {r.title}
+                                    </Link>
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="mt-1 text-[11px] text-atlasnavy/40">
+                                Used (article not found)
+                              </div>
+                            ))}
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
