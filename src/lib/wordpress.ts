@@ -23,6 +23,7 @@ export interface ArticleForWordPress {
   slug: string;
   content_md: string;
   faqs: { question: string; answer: string }[];
+  focus_keyword?: string;
 }
 
 const SITE = "https://freelanceatlas.com";
@@ -160,6 +161,10 @@ export async function createWordPressDraft(
     meta: {
       _yoast_wpseo_title: stripDashes(article.meta_title || article.title),
       _yoast_wpseo_metadesc: stripDashes(article.meta_description),
+      // Yoast focus keyword — persists via REST (Yoast registers this meta key).
+      ...(article.focus_keyword?.trim()
+        ? { _yoast_wpseo_focuskw: article.focus_keyword.trim() }
+        : {}),
     },
   };
 

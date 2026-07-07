@@ -27,11 +27,30 @@ export async function sendArticleToWordPress(articleId: string) {
   const supabase = createClient();
   const { data: article, error } = await supabase
     .from("articles")
-    .select("h1, title, meta_title, meta_description, slug, content_md, faqs")
+    .select("h1, title, meta_title, meta_description, slug, content_md, faqs, keyword_table")
     .eq("id", articleId)
     .single();
 
   if (error || !article) throw new Error(error?.message ?? "Article not found.");
+
+  // Focus keyword = the article's primary keyword, for Yoast. Prefer the first
+  // entry in keyword_table (the primary keyword), fall back to the topic that was
+  // logged when the draft was generated (generation_logs.input_topic).
+  const ktFirst =
+    Array.isArray(article.keyword_table) && typeof (article.keyword_table[0] as any)?.keyword === "string"
+      ? String((article.keyword_table[0] as any).keyword)
+      : "";
+  let focusKeyword = ktFirst.trim();
+  if (!focusKeyword) {
+    const { data: genLog } = await supabase
+      .from("generation_logs")
+      .select("input_topic")
+      .eq("article_id", articleId)
+      .not("input_topic", "is", null)
+      .limit(1)
+      .maybeSingle();
+    focusKeyword = (genLog?.input_topic ?? "").toString().trim();
+  }
 
   const bodyHtml = await formatArticleToDocHtml({
     h1: article.h1 ?? "",
@@ -59,6 +78,7 @@ export async function sendArticleToWordPress(articleId: string) {
       slug: article.slug ?? "",
       content_md: article.content_md ?? "",
       faqs: (article.faqs as { question: string; answer: string }[]) ?? [],
+      focus_keyword: focusKeyword || undefined,
     },
     bodyHtml,
     thumb?.thumbnail_media_id ?? null
