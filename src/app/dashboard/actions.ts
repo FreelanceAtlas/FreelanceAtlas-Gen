@@ -15,6 +15,7 @@ import {
 } from "@/lib/thumbnail";
 import { regenerateDraftBody } from "@/lib/generate";
 import { fetchSourcesText } from "@/lib/fetchSourceText";
+import { factCheckViaOpenRouter, checkOriginalityViaOpenRouter } from "@/lib/redoScoring";
 
 // Formats a ready article into the live theme's `.doc` HTML (via OpenRouter)
 // and pushes it to freelanceatlas.com as a WordPress DRAFT. Returns the WP
@@ -509,116 +510,91 @@ export async function redoDraftArticle(articleId: string): Promise<{
   await supabase.from("articles").update({ redo_status: "processing" }).eq("id", articleId);
   revalidatePath("/dashboard/articles");
 
+  // Score a candidate (grounded, via OpenRouter/claude-sonnet-4.5). rank is used to
+  // keep the best candidate across iterations: passing gates first, then the sum of
+  // the two scores (fact is the usual bottleneck).
+  const scoreCandidate = async (c: string, f: { question: string; answer: string }[], fetched: Record<string, string>) => {
+    const [orig, fact] = await Promise.all([
+      checkOriginalityViaOpenRouter(c),
+      factCheckViaOpenRouter(c, f, fetched),
+    ]);
+    const passes = isOrigOk(orig) && isFactOk(fact);
+    const rank = (passes ? 1000 : 0) + orig.originality_score + fact.accuracy_score;
+    return { content: c, faqs: f, orig, fact, passes, rank };
+  };
+
+  // Kept to 2 so the whole redo (fetch + baseline score + up to 2 fix/re-score
+  // cycles, scoring runs parallel) stays well under the route's time budget.
+  // Improvements are saved each run, so clicking Redo again continues converging.
+  const MAX_ATTEMPTS = 2;
+
   try {
     // 1. Ground truth: fetch the source pages server-side.
     const fetchedSources = await fetchSourcesText(sources);
 
-    // 2. Grounded baseline re-score (this is what surfaces the real issues).
-    const [baseOrig, baseFact] = await Promise.all([
-      checkOriginality(content, sources),
-      factCheckArticle(content, faqs, sources, fetchedSources),
-    ]);
+    // 2. Grounded baseline re-score (surfaces the real, itemized issues).
+    let best = await scoreCandidate(content, faqs, fetchedSources);
+    const baseline = best;
 
-    // 3. Grounding alone cleared it — save the honest scores and promote.
-    if (isOrigOk(baseOrig) && isFactOk(baseFact)) {
-      await supabase
-        .from("articles")
-        .update({ originality_check: baseOrig, fact_check: baseFact, redo_status: null })
-        .eq("id", articleId);
-      revalidatePath("/dashboard/articles");
-      revalidatePath(`/dashboard/articles/${article.slug}`);
-      return {
-        ranRedo: true,
-        promoted: true,
-        originalityScore: baseOrig.originality_score,
-        factCheckScore: baseFact.accuracy_score,
-        message: "Passed once figures were verified against the live sources.",
-      };
+    // 3. Iterate: fix the current best's grounded issues, re-score, keep the best
+    //    candidate. Repeated passes converge these figure-heavy drafts to passing
+    //    (a single pass is variable and rarely clears all ~20 flagged figures).
+    for (let attempt = 0; attempt < MAX_ATTEMPTS && !best.passes; attempt++) {
+      const origIssues = isOrigOk(best.orig) ? [] : best.orig.issues ?? [];
+      const factIssues = isFactOk(best.fact) ? [] : best.fact.issues ?? [];
+      if (origIssues.length === 0 && factIssues.length === 0) break; // nothing actionable
+
+      const redo = await regenerateDraftBody({
+        contentMd: best.content,
+        faqs: best.faqs,
+        sources,
+        originalityIssues: origIssues,
+        factIssues,
+        fetchedSources,
+      });
+      if (!redo.rewritten) break; // keep best so far
+
+      const candidate = await scoreCandidate(stripDashes(redo.content_md), redo.faqs, fetchedSources);
+      if (candidate.rank > best.rank) best = candidate;
     }
 
-    const origIssues = isOrigOk(baseOrig) ? [] : baseOrig.issues ?? [];
-    const factIssues = isFactOk(baseFact) ? [] : baseFact.issues ?? [];
+    // 4. Decide what to persist. Save the best candidate if it passes or is a real
+    //    improvement over the baseline; otherwise keep the original content but still
+    //    store the honest grounded baseline scores (so the UI stops showing stale
+    //    blind results). Never persist a candidate worse than the baseline.
+    const improved = best.rank > baseline.rank; // best !== baseline and strictly better
+    const toSave = best.passes || improved ? best : baseline;
+    const keptOriginal = toSave === baseline && best.rank <= baseline.rank && best !== baseline;
 
-    // No actionable issues to target — save the honest grounded scores so the UI
-    // reflects reality instead of a stale blind result, and report it.
-    if (origIssues.length === 0 && factIssues.length === 0) {
-      await supabase
-        .from("articles")
-        .update({ originality_check: baseOrig, fact_check: baseFact, redo_status: null })
-        .eq("id", articleId);
-      revalidatePath("/dashboard/articles");
-      revalidatePath(`/dashboard/articles/${article.slug}`);
-      return {
-        ranRedo: true,
-        promoted: false,
-        originalityScore: baseOrig.originality_score,
-        factCheckScore: baseFact.accuracy_score,
-        message: "The checker flagged the draft but listed no specific claim to fix — needs a human look.",
-      };
+    const update: Record<string, unknown> = {
+      originality_check: toSave.orig,
+      fact_check: toSave.fact,
+      redo_status: null,
+    };
+    // Only rewrite content/faqs when we're saving an actual (improved) rewrite.
+    if (toSave !== baseline) {
+      update.content_md = toSave.content;
+      update.faqs = toSave.faqs;
     }
 
-    // 4. Rewrite to fix the grounded issues, using the fetched text as ground truth.
-    const redo = await regenerateDraftBody({
-      contentMd: content,
-      faqs,
-      sources,
-      originalityIssues: origIssues,
-      factIssues,
-      fetchedSources,
-    });
-    if (!redo.rewritten) {
-      throw new Error(redo.error ?? "Redo did not produce a rewrite.");
-    }
-    const cleanedContent = stripDashes(redo.content_md);
-    const fixedFaqs = redo.faqs;
-
-    // Re-score the fix, grounded in the same fetched text.
-    const [newOrig, newFact] = await Promise.all([
-      checkOriginality(cleanedContent, sources),
-      factCheckArticle(cleanedContent, fixedFaqs, sources, fetchedSources),
-    ]);
-    const nowPasses = isOrigOk(newOrig) && isFactOk(newFact);
-
-    // Regression guard: if the rewrite didn't pass AND scored lower than the
-    // grounded baseline on either dimension, keep the original content — but still
-    // save the (accurate) grounded baseline scores so the UI is honest.
-    const regressed =
-      newOrig.originality_score < baseOrig.originality_score || newFact.accuracy_score < baseFact.accuracy_score;
-    if (!nowPasses && regressed) {
-      await supabase
-        .from("articles")
-        .update({ originality_check: baseOrig, fact_check: baseFact, redo_status: null })
-        .eq("id", articleId);
-      revalidatePath("/dashboard/articles");
-      revalidatePath(`/dashboard/articles/${article.slug}`);
-      return {
-        ranRedo: true,
-        promoted: false,
-        originalityScore: baseOrig.originality_score,
-        factCheckScore: baseFact.accuracy_score,
-        message: `Rewrite scored lower (Orig ${newOrig.originality_score}, Fact ${newFact.accuracy_score}), so the original was kept. Try again.`,
-      };
-    }
-
-    const { error: updateError } = await supabase
-      .from("articles")
-      .update({
-        content_md: cleanedContent,
-        faqs: fixedFaqs,
-        originality_check: newOrig,
-        fact_check: newFact,
-        redo_status: null,
-      })
-      .eq("id", articleId);
+    const { error: updateError } = await supabase.from("articles").update(update).eq("id", articleId);
     if (updateError) throw new Error(updateError.message);
 
     revalidatePath("/dashboard/articles");
     revalidatePath(`/dashboard/articles/${article.slug}`);
+
+    let message: string | undefined;
+    if (toSave.passes) message = undefined;
+    else if (toSave !== baseline) message = `Improved to Orig ${toSave.orig.originality_score}, Fact ${toSave.fact.accuracy_score} but still below gate. Try again.`;
+    else if (keptOriginal) message = `Rewrite didn't beat the original (best Orig ${best.orig.originality_score}, Fact ${best.fact.accuracy_score}), so the original was kept. Try again.`;
+    else message = `Still below gate (Orig ${toSave.orig.originality_score}, Fact ${toSave.fact.accuracy_score}) — the flagged claims may need a human check.`;
+
     return {
       ranRedo: true,
-      promoted: nowPasses,
-      originalityScore: newOrig.originality_score,
-      factCheckScore: newFact.accuracy_score,
+      promoted: toSave.passes,
+      originalityScore: toSave.orig.originality_score,
+      factCheckScore: toSave.fact.accuracy_score,
+      message,
     };
   } catch (e) {
     await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
