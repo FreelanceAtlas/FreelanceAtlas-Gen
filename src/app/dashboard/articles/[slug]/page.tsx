@@ -14,11 +14,17 @@ export default async function ArticleDetail({ params }: { params: { slug: string
   const supabase = createClient();
   const { data: article } = await supabase
     .from("articles")
-    .select("*, clusters(name)")
+    .select("*")
     .eq("slug", params.slug)
     .single();
 
   if (!article) notFound();
+
+  // Resolve the cluster name via a separate lookup rather than a PostgREST embed,
+  // which would require a declared articles->clusters FK constraint.
+  const { data: cluster } = article.cluster_id
+    ? await supabase.from("clusters").select("name").eq("id", article.cluster_id).single()
+    : { data: null };
 
   const markerEntries = (article.keyword_table ?? []).map((k: any) => ({
     marker: k.marker,
@@ -57,7 +63,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       <div className="flex items-start justify-between">
         <div>
           <p className="text-xs font-medium uppercase tracking-wide text-atlasteal">
-            {article.clusters?.name}
+            {cluster?.name}
           </p>
           <h1
             className="mt-1 text-2xl font-bold text-atlasnavy"

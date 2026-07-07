@@ -5,12 +5,23 @@ import ArticlesManager, { ArticleRow } from "@/components/ArticlesManager";
 
 export default async function ArticlesPage() {
   const supabase = createClient();
-  const { data: articles } = await supabase
-    .from("articles")
-    .select(
-      "id, title, slug, status, created_at, scheduled_publish_at, originality_check, fact_check, wp_post_id, wp_edit_link, wp_status, thumbnail_url, clusters(name)"
-    )
-    .order("created_at", { ascending: false });
+
+  // Select "*" (never 400s on a missing column) and resolve cluster names via a
+  // separate lookup instead of a PostgREST embed — the embed requires a declared
+  // articles->clusters FK constraint, which, if absent, would fail the whole query
+  // and leave this tab empty even though the drafts exist.
+  const [{ data: articles, error: articlesError }, { data: clusters }] = await Promise.all([
+    supabase.from("articles").select("*").order("created_at", { ascending: false }),
+    supabase.from("clusters").select("id, name"),
+  ]);
+
+  if (articlesError) {
+    console.error("[articles] query failed:", articlesError);
+  }
+
+  const clusterNameById = new Map<string, string>(
+    (clusters ?? []).map((c: any) => [c.id, c.name])
+  );
 
   const rows: ArticleRow[] = (articles ?? []).map((a: any) => {
     const originality = a.originality_check as { originality_score: number; needs_review: boolean } | null;
@@ -26,7 +37,7 @@ export default async function ArticlesPage() {
       title: a.title,
       slug: a.slug,
       status: a.status,
-      clusterName: a.clusters?.name ?? null,
+      clusterName: a.cluster_id ? clusterNameById.get(a.cluster_id) ?? null : null,
       originalityScore: originality?.originality_score ?? null,
       originalityNeedsReview: originality?.needs_review ?? false,
       factCheckScore: factCheck?.accuracy_score ?? null,
