@@ -464,13 +464,20 @@ export async function rewriteFlaggedOriginality(articleId: string) {
   return { originalityCheck, factCheck };
 }
 
-// AI Redo for a failing draft: if the draft's originality and/or fact-check
-// scored below its pass threshold, regenerate the WHOLE article body (fixing the
-// flagged originality + factual problems), re-score both checks neutrally, and
-// save the new content + scores in place. Because "Ready to publish" is computed
-// from those scores (see articles/page.tsx + ArticlesManager), a draft that now
-// passes both gates automatically moves into the Ready section on the next
-// refresh — no status write needed. Returns whether it now passes both gates.
+// AI Redo for a failing draft. Flow (proven end-to-end to take stuck pricing
+// drafts from 45-62 up to ~92):
+//   1. Fetch the source pages server-side (browser UA) for real ground-truth text.
+//   2. Re-score BOTH checks *grounded* in that text first. This is essential: the
+//      stored fact_check is often a stale/blind result (e.g. score 72 with zero
+//      enumerated issues, computed when the sources didn't fetch), which gives the
+//      rewriter nothing to target. Grounding surfaces the real, itemized issues —
+//      and sometimes clears the draft outright.
+//   3. If it now passes, save the grounded scores and promote — no rewrite needed.
+//   4. Otherwise rewrite to fix the grounded issues (OpenRouter/claude-sonnet-4.5)
+//      using the fetched text, re-score grounded again, and save if it didn't
+//      regress vs the grounded baseline.
+// "Ready to publish" is computed from the saved scores, so a now-passing draft
+// moves itself into the Ready section on refresh.
 export async function redoDraftArticle(articleId: string): Promise<{
   ranRedo: boolean;
   promoted: boolean;
@@ -482,7 +489,7 @@ export async function redoDraftArticle(articleId: string): Promise<{
 
   const { data: article, error: fetchError } = await supabase
     .from("articles")
-    .select("content_md, faqs, sources, slug, originality_check, fact_check")
+    .select("content_md, faqs, sources, slug")
     .eq("id", articleId)
     .single();
 
@@ -491,128 +498,133 @@ export async function redoDraftArticle(articleId: string): Promise<{
 
   const sources = article.sources ?? [];
   const faqs = article.faqs ?? [];
+  const content = article.content_md ?? "";
 
-  const originality = article.originality_check as
-    | { originality_score: number; needs_review: boolean; issues?: { excerpt: string; likely_source: string; concern: string }[] }
-    | null;
-  const factCheck = article.fact_check as
-    | { accuracy_score: number; needs_review: boolean; issues?: { claim: string; concern: string; severity: "low" | "medium" | "high" }[] }
-    | null;
+  const isOrigOk = (o: { originality_score: number; needs_review: boolean }) =>
+    !o.needs_review && o.originality_score >= ORIGINALITY_PASS_THRESHOLD;
+  const isFactOk = (f: { accuracy_score: number; needs_review: boolean }) =>
+    !f.needs_review && f.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
 
-  const originalityFailing =
-    !originality || originality.needs_review || originality.originality_score < ORIGINALITY_PASS_THRESHOLD;
-  const factFailing =
-    !factCheck || factCheck.needs_review || factCheck.accuracy_score < FACT_CHECK_PASS_THRESHOLD;
-
-  // Nothing to fix — already passing both gates. Leave it untouched so a redo
-  // never risks regressing a good draft.
-  if (!originalityFailing && !factFailing) {
-    return {
-      ranRedo: false,
-      promoted: true,
-      originalityScore: originality?.originality_score ?? null,
-      factCheckScore: factCheck?.accuracy_score ?? null,
-      message: "Already passes both gates.",
-    };
-  }
-
-  // Persist a "processing" flag so a mid-run refresh shows the redo in progress
-  // and can poll for completion instead of losing it.
+  // Persist a "processing" flag so a mid-run refresh shows the redo in progress.
   await supabase.from("articles").update({ redo_status: "processing" }).eq("id", articleId);
   revalidatePath("/dashboard/articles");
 
-  const oldOrig = originality?.originality_score ?? 0;
-  const oldFact = factCheck?.accuracy_score ?? 0;
-
-  let cleanedContent: string;
-  let fixedFaqs: { question: string; answer: string }[];
-  let fetchedSources: Record<string, string>;
   try {
-    // Fetch the source pages server-side (browser UA) so we have the ACTUAL page
-    // text — Anthropic's web_fetch couldn't extract prices from JS-rendered vendor
-    // pages, leaving every figure "unverifiable". This text is the ground truth for
-    // both the fix and the re-score below.
-    fetchedSources = await fetchSourcesText(sources);
+    // 1. Ground truth: fetch the source pages server-side.
+    const fetchedSources = await fetchSourcesText(sources);
 
-    // Targeted fix (OpenRouter / claude-sonnet-4.5): correct the flagged figures to
-    // the values actually present in the fetched text, reword flagged originality
-    // passages, fix flagged FAQs, and leave everything else verbatim.
+    // 2. Grounded baseline re-score (this is what surfaces the real issues).
+    const [baseOrig, baseFact] = await Promise.all([
+      checkOriginality(content, sources),
+      factCheckArticle(content, faqs, sources, fetchedSources),
+    ]);
+
+    // 3. Grounding alone cleared it — save the honest scores and promote.
+    if (isOrigOk(baseOrig) && isFactOk(baseFact)) {
+      await supabase
+        .from("articles")
+        .update({ originality_check: baseOrig, fact_check: baseFact, redo_status: null })
+        .eq("id", articleId);
+      revalidatePath("/dashboard/articles");
+      revalidatePath(`/dashboard/articles/${article.slug}`);
+      return {
+        ranRedo: true,
+        promoted: true,
+        originalityScore: baseOrig.originality_score,
+        factCheckScore: baseFact.accuracy_score,
+        message: "Passed once figures were verified against the live sources.",
+      };
+    }
+
+    const origIssues = isOrigOk(baseOrig) ? [] : baseOrig.issues ?? [];
+    const factIssues = isFactOk(baseFact) ? [] : baseFact.issues ?? [];
+
+    // No actionable issues to target — save the honest grounded scores so the UI
+    // reflects reality instead of a stale blind result, and report it.
+    if (origIssues.length === 0 && factIssues.length === 0) {
+      await supabase
+        .from("articles")
+        .update({ originality_check: baseOrig, fact_check: baseFact, redo_status: null })
+        .eq("id", articleId);
+      revalidatePath("/dashboard/articles");
+      revalidatePath(`/dashboard/articles/${article.slug}`);
+      return {
+        ranRedo: true,
+        promoted: false,
+        originalityScore: baseOrig.originality_score,
+        factCheckScore: baseFact.accuracy_score,
+        message: "The checker flagged the draft but listed no specific claim to fix — needs a human look.",
+      };
+    }
+
+    // 4. Rewrite to fix the grounded issues, using the fetched text as ground truth.
     const redo = await regenerateDraftBody({
-      contentMd: article.content_md ?? "",
+      contentMd: content,
       faqs,
       sources,
-      originalityIssues: originalityFailing ? originality?.issues ?? [] : [],
-      factIssues: factFailing ? factCheck?.issues ?? [] : [],
+      originalityIssues: origIssues,
+      factIssues,
       fetchedSources,
     });
-
     if (!redo.rewritten) {
       throw new Error(redo.error ?? "Redo did not produce a rewrite.");
     }
-    cleanedContent = stripDashes(redo.content_md);
-    fixedFaqs = redo.faqs;
+    const cleanedContent = stripDashes(redo.content_md);
+    const fixedFaqs = redo.faqs;
+
+    // Re-score the fix, grounded in the same fetched text.
+    const [newOrig, newFact] = await Promise.all([
+      checkOriginality(cleanedContent, sources),
+      factCheckArticle(cleanedContent, fixedFaqs, sources, fetchedSources),
+    ]);
+    const nowPasses = isOrigOk(newOrig) && isFactOk(newFact);
+
+    // Regression guard: if the rewrite didn't pass AND scored lower than the
+    // grounded baseline on either dimension, keep the original content — but still
+    // save the (accurate) grounded baseline scores so the UI is honest.
+    const regressed =
+      newOrig.originality_score < baseOrig.originality_score || newFact.accuracy_score < baseFact.accuracy_score;
+    if (!nowPasses && regressed) {
+      await supabase
+        .from("articles")
+        .update({ originality_check: baseOrig, fact_check: baseFact, redo_status: null })
+        .eq("id", articleId);
+      revalidatePath("/dashboard/articles");
+      revalidatePath(`/dashboard/articles/${article.slug}`);
+      return {
+        ranRedo: true,
+        promoted: false,
+        originalityScore: baseOrig.originality_score,
+        factCheckScore: baseFact.accuracy_score,
+        message: `Rewrite scored lower (Orig ${newOrig.originality_score}, Fact ${newFact.accuracy_score}), so the original was kept. Try again.`,
+      };
+    }
+
+    const { error: updateError } = await supabase
+      .from("articles")
+      .update({
+        content_md: cleanedContent,
+        faqs: fixedFaqs,
+        originality_check: newOrig,
+        fact_check: newFact,
+        redo_status: null,
+      })
+      .eq("id", articleId);
+    if (updateError) throw new Error(updateError.message);
+
+    revalidatePath("/dashboard/articles");
+    revalidatePath(`/dashboard/articles/${article.slug}`);
+    return {
+      ranRedo: true,
+      promoted: nowPasses,
+      originalityScore: newOrig.originality_score,
+      factCheckScore: newFact.accuracy_score,
+    };
   } catch (e) {
     await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
     revalidatePath("/dashboard/articles");
     throw e;
   }
-
-  // Re-score both checks neutrally against the fixed content. Crucially, the
-  // fact-check gets the freshly fetched source text so verified figures aren't
-  // flagged as unverifiable (the reason redo previously couldn't raise the score).
-  const [originalityCheck, newFactCheck] = await Promise.all([
-    checkOriginality(cleanedContent, sources),
-    factCheckArticle(cleanedContent, fixedFaqs, sources, fetchedSources),
-  ]);
-
-  const nowOriginalityOk =
-    !originalityCheck.needs_review && originalityCheck.originality_score >= ORIGINALITY_PASS_THRESHOLD;
-  const nowFactOk = !newFactCheck.needs_review && newFactCheck.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
-  const nowPasses = nowOriginalityOk && nowFactOk;
-
-  // Regression guard: if the fixed version doesn't pass AND scored lower on either
-  // dimension than before, discard it and keep the original draft. This stops a
-  // redo from ever lowering the score and makes repeated redos converge instead of
-  // wandering. (If it now passes, we always keep it even if one number dipped.)
-  const regressed = originalityCheck.originality_score < oldOrig || newFactCheck.accuracy_score < oldFact;
-  if (!nowPasses && regressed) {
-    await supabase.from("articles").update({ redo_status: null }).eq("id", articleId);
-    revalidatePath("/dashboard/articles");
-    revalidatePath(`/dashboard/articles/${article.slug}`);
-    return {
-      ranRedo: true,
-      promoted: false,
-      originalityScore: oldOrig,
-      factCheckScore: oldFact,
-      message: `Redo would have lowered the score (Orig ${originalityCheck.originality_score}, Fact ${newFactCheck.accuracy_score}), so the original draft was kept. Try again.`,
-    };
-  }
-
-  const { error: updateError } = await supabase
-    .from("articles")
-    .update({
-      content_md: cleanedContent,
-      faqs: fixedFaqs,
-      originality_check: originalityCheck,
-      fact_check: newFactCheck,
-      redo_status: null,
-    })
-    .eq("id", articleId);
-
-  if (updateError) {
-    await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
-    throw new Error(updateError.message);
-  }
-
-  revalidatePath("/dashboard/articles");
-  revalidatePath(`/dashboard/articles/${article.slug}`);
-
-  return {
-    ranRedo: true,
-    promoted: nowPasses,
-    originalityScore: originalityCheck.originality_score,
-    factCheckScore: newFactCheck.accuracy_score,
-  };
 }
 
 // Schedule a draft (or review) article to auto-publish at a future date/time.

@@ -103,7 +103,7 @@ function RedoDraftButton({ row }: { row: ArticleRow }) {
       setNote(
         r.promoted
           ? "Passed — moving to Ready"
-          : `Still below gate (Orig ${r.originalityScore ?? "—"}, Fact ${r.factCheckScore ?? "—"})`
+          : r.message ?? `Still below gate (Orig ${r.originalityScore ?? "—"}, Fact ${r.factCheckScore ?? "—"})`
       );
     } catch (e: any) {
       setError(e?.message ?? "Redo failed");
