@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { scheduleArticle, unscheduleArticle, bulkDeleteArticles } from "@/app/dashboard/actions";
+import { scheduleArticle, unscheduleArticle, bulkDeleteArticles, redoDraftArticle } from "@/app/dashboard/actions";
 import SendToWordPressButton from "@/components/SendToWordPressButton";
 import PublishToSiteButton from "@/components/PublishToSiteButton";
 import ThumbnailControl from "@/components/ThumbnailControl";
@@ -60,6 +60,50 @@ function ScoreBadges({ row }: { row: ArticleRow }) {
       >
         Fact {row.factCheckScore ?? "—"}
       </span>
+    </div>
+  );
+}
+
+// Per-draft "Redo with AI" button: regenerates the whole article to fix whichever
+// gate is failing, re-scores, and (if it now passes both) lets the row move itself
+// into "Ready to publish" on refresh.
+function RedoDraftButton({ row }: { row: ArticleRow }) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  async function run() {
+    setPending(true);
+    setError(null);
+    setNote(null);
+    try {
+      const r = await redoDraftArticle(row.id);
+      if (r.promoted) {
+        setNote("Passed — moving to Ready");
+      } else {
+        setNote(`Still below gate (Orig ${r.originalityScore ?? "—"}, Fact ${r.factCheckScore ?? "—"})`);
+      }
+      router.refresh();
+    } catch (e: any) {
+      setError(e?.message ?? "Redo failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        onClick={run}
+        disabled={pending}
+        title="Regenerate this draft with AI to fix failing originality/fact checks, then re-score"
+        className="rounded-md bg-atlasnavy px-2 py-0.5 text-[11px] font-medium text-white hover:bg-atlasnavy/90 disabled:opacity-50"
+      >
+        {pending ? "Redoing…" : "Redo with AI"}
+      </button>
+      {note && <span className="text-[11px] text-atlasnavy/50">{note}</span>}
+      {error && <span className="text-[11px] text-red-600">{error}</span>}
     </div>
   );
 }
@@ -204,6 +248,7 @@ function SelectableSection({
   showSchedule = true,
   renderExtra,
   renderFooter,
+  headerAction,
 }: {
   title: string;
   description: string;
@@ -213,6 +258,7 @@ function SelectableSection({
   showSchedule?: boolean;
   renderExtra?: (row: ArticleRow) => React.ReactNode;
   renderFooter?: (row: ArticleRow) => React.ReactNode;
+  headerAction?: React.ReactNode;
 }) {
   const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
 
@@ -240,12 +286,15 @@ function SelectableSection({
           <h2 className="text-sm font-semibold text-atlasnavy">{title}</h2>
           <p className="text-xs text-atlasnavy/50">{description}</p>
         </div>
-        {rows.length > 0 && (
-          <label className="flex items-center gap-1.5 text-xs text-atlasnavy/60">
-            <input type="checkbox" checked={allSelected} onChange={toggleAll} className="h-3.5 w-3.5" />
-            Select all
-          </label>
-        )}
+        <div className="flex items-center gap-3">
+          {headerAction}
+          {rows.length > 0 && (
+            <label className="flex items-center gap-1.5 text-xs text-atlasnavy/60">
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} className="h-3.5 w-3.5" />
+              Select all
+            </label>
+          )}
+        </div>
       </div>
       <ul className="mt-2 divide-y divide-atlasnavy/10 rounded-xl bg-white shadow-sm">
         {rows.map((row) => (
@@ -271,6 +320,8 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
   const [bulkSchedule, setBulkSchedule] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [redoAllPending, setRedoAllPending] = useState(false);
+  const [redoProgress, setRedoProgress] = useState<string | null>(null);
 
   const { ready, pushedDraft, liveOnSite, drafts, published } = useMemo(() => {
     const ready: ArticleRow[] = [];
@@ -326,6 +377,34 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
     } finally {
       setPending(false);
     }
+  }
+
+  // Bulk "Redo all drafts": run the AI redo over every draft sequentially (each is
+  // several LLM calls, so one-at-a-time keeps every request within the serverless
+  // time limit and shows honest progress) and refresh once at the end so drafts
+  // that now pass both gates jump to Ready.
+  async function handleRedoAll() {
+    if (drafts.length === 0 || redoAllPending) return;
+    const confirmed = window.confirm(
+      `Redo ${drafts.length} draft${drafts.length === 1 ? "" : "s"} with AI? Each is regenerated and re-scored; this can take a while and uses the generation API.`
+    );
+    if (!confirmed) return;
+    setRedoAllPending(true);
+    setError(null);
+    let promoted = 0;
+    let failed = 0;
+    for (let i = 0; i < drafts.length; i++) {
+      setRedoProgress(`Redoing ${i + 1}/${drafts.length}…`);
+      try {
+        const r = await redoDraftArticle(drafts[i].id);
+        if (r.promoted) promoted++;
+      } catch {
+        failed++;
+      }
+    }
+    setRedoProgress(`Done — ${promoted} moved to Ready${failed ? `, ${failed} errored` : ""}`);
+    setRedoAllPending(false);
+    router.refresh();
   }
 
   return (
@@ -420,10 +499,25 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
 
       <SelectableSection
         title="Drafts"
-        description="Still needs work, a recheck, or hasn't been checked yet."
+        description="Still needs work, a recheck, or hasn't been checked yet. 'Redo with AI' regenerates the draft to fix failing gates."
         rows={drafts}
         selected={selected}
         setSelected={setSelected}
+        renderExtra={(row) => <RedoDraftButton row={row} />}
+        headerAction={
+          drafts.length > 0 ? (
+            <div className="flex items-center gap-2">
+              {redoProgress && <span className="text-[11px] text-atlasnavy/50">{redoProgress}</span>}
+              <button
+                onClick={handleRedoAll}
+                disabled={redoAllPending}
+                className="rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-medium text-atlasnavy hover:bg-atlassand disabled:opacity-50"
+              >
+                {redoAllPending ? "Redoing all…" : "Redo all with AI"}
+              </button>
+            </div>
+          ) : null
+        }
       />
 
       <div>

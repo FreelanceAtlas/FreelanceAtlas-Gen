@@ -13,6 +13,7 @@ import {
   uploadThumbnailToWp,
   fetchImageAsBase64,
 } from "@/lib/thumbnail";
+import { regenerateDraftBody } from "@/lib/generate";
 
 // Formats a ready article into the live theme's `.doc` HTML (via OpenRouter)
 // and pushes it to freelanceatlas.com as a WordPress DRAFT. Returns the WP
@@ -117,10 +118,21 @@ export async function generateArticleThumbnail(articleId: string) {
   const png = await renderThumbnail(scene);
   const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
 
-  await supabase
+  const { error: saveError } = await supabase
     .from("articles")
     .update({ thumbnail_media_id: mediaId, thumbnail_url: url, thumbnail_scene: JSON.stringify(scene) })
     .eq("id", articleId);
+
+  // The image was uploaded to WP, but if we can't persist the media id/url the
+  // thumbnail would vanish on refresh and never attach as the featured image.
+  // Surface that loudly instead of silently succeeding (usually means the
+  // thumbnail_* columns are missing — run migrations/add_thumbnail_columns.sql).
+  if (saveError) {
+    throw new Error(
+      `Thumbnail rendered and uploaded to WordPress (media #${mediaId}), but could not be saved to the article: ${saveError.message}. ` +
+        `If this mentions a missing column, run migrations/add_thumbnail_columns.sql in Supabase.`
+    );
+  }
 
   revalidatePath("/dashboard/articles");
   return { url, mediaId };
@@ -150,10 +162,17 @@ export async function redoArticleThumbnail(articleId: string, changeNote: string
   const png = await editThumbnail(prev, changeNote, header);
   const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
 
-  await supabase
+  const { error: saveError } = await supabase
     .from("articles")
     .update({ thumbnail_media_id: mediaId, thumbnail_url: url })
     .eq("id", articleId);
+
+  if (saveError) {
+    throw new Error(
+      `New thumbnail uploaded to WordPress (media #${mediaId}), but could not be saved to the article: ${saveError.message}. ` +
+        `If this mentions a missing column, run migrations/add_thumbnail_columns.sql in Supabase.`
+    );
+  }
 
   revalidatePath("/dashboard/articles");
   return { url, mediaId };
@@ -417,6 +436,106 @@ export async function rewriteFlaggedOriginality(articleId: string) {
   revalidatePath(`/dashboard/articles/${article.slug}`);
 
   return { originalityCheck, factCheck };
+}
+
+// AI Redo for a failing draft: if the draft's originality and/or fact-check
+// scored below its pass threshold, regenerate the WHOLE article body (fixing the
+// flagged originality + factual problems), re-score both checks neutrally, and
+// save the new content + scores in place. Because "Ready to publish" is computed
+// from those scores (see articles/page.tsx + ArticlesManager), a draft that now
+// passes both gates automatically moves into the Ready section on the next
+// refresh — no status write needed. Returns whether it now passes both gates.
+export async function redoDraftArticle(articleId: string): Promise<{
+  ranRedo: boolean;
+  promoted: boolean;
+  originalityScore: number | null;
+  factCheckScore: number | null;
+  message?: string;
+}> {
+  const supabase = createClient();
+
+  const { data: article, error: fetchError } = await supabase
+    .from("articles")
+    .select("content_md, faqs, sources, slug, originality_check, fact_check")
+    .eq("id", articleId)
+    .single();
+
+  if (fetchError) throw new Error(fetchError.message);
+  if (!article) throw new Error("Article not found");
+
+  const sources = article.sources ?? [];
+  const faqs = article.faqs ?? [];
+
+  const originality = article.originality_check as
+    | { originality_score: number; needs_review: boolean; issues?: { excerpt: string; likely_source: string; concern: string }[] }
+    | null;
+  const factCheck = article.fact_check as
+    | { accuracy_score: number; needs_review: boolean; issues?: { claim: string; concern: string; severity: "low" | "medium" | "high" }[] }
+    | null;
+
+  const originalityFailing =
+    !originality || originality.needs_review || originality.originality_score < ORIGINALITY_PASS_THRESHOLD;
+  const factFailing =
+    !factCheck || factCheck.needs_review || factCheck.accuracy_score < FACT_CHECK_PASS_THRESHOLD;
+
+  // Nothing to fix — already passing both gates. Leave it untouched so a redo
+  // never risks regressing a good draft.
+  if (!originalityFailing && !factFailing) {
+    return {
+      ranRedo: false,
+      promoted: true,
+      originalityScore: originality?.originality_score ?? null,
+      factCheckScore: factCheck?.accuracy_score ?? null,
+      message: "Already passes both gates.",
+    };
+  }
+
+  // Regenerate the whole body, feeding in whichever checks are failing so the
+  // model targets the actual problems. If a check is passing we still pass its
+  // (empty) issues so the rewrite doesn't undo what already works.
+  const redo = await regenerateDraftBody({
+    contentMd: article.content_md ?? "",
+    sources,
+    originalityIssues: originalityFailing ? originality?.issues ?? [] : [],
+    factIssues: factFailing ? factCheck?.issues ?? [] : [],
+  });
+
+  if (!redo.rewritten) {
+    throw new Error(redo.error ?? "Redo did not produce a rewrite.");
+  }
+
+  const cleanedContent = stripDashes(redo.content_md);
+
+  // Re-score both checks neutrally against the fresh content.
+  const [originalityCheck, newFactCheck] = await Promise.all([
+    checkOriginality(cleanedContent, sources),
+    factCheckArticle(cleanedContent, faqs, sources),
+  ]);
+
+  const { error: updateError } = await supabase
+    .from("articles")
+    .update({
+      content_md: cleanedContent,
+      originality_check: originalityCheck,
+      fact_check: newFactCheck,
+    })
+    .eq("id", articleId);
+
+  if (updateError) throw new Error(updateError.message);
+
+  const nowOriginalityOk =
+    !originalityCheck.needs_review && originalityCheck.originality_score >= ORIGINALITY_PASS_THRESHOLD;
+  const nowFactOk = !newFactCheck.needs_review && newFactCheck.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
+
+  revalidatePath("/dashboard/articles");
+  revalidatePath(`/dashboard/articles/${article.slug}`);
+
+  return {
+    ranRedo: true,
+    promoted: nowOriginalityOk && nowFactOk,
+    originalityScore: originalityCheck.originality_score,
+    factCheckScore: newFactCheck.accuracy_score,
+  };
 }
 
 // Schedule a draft (or review) article to auto-publish at a future date/time.

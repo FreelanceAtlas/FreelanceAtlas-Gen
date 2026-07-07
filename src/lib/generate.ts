@@ -1390,3 +1390,150 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
 
   return { article: redactUnverifiedFiguresFromArticle(article, fetchedSources), fetchedSources };
 }
+
+// ── Redo: whole-article regeneration for a failing draft ─────────────────────
+// Unlike rewriteFlaggedPassages (originality) which surgically edits only the
+// flagged spans, this rewrites the ENTIRE article body in the model's own words
+// while fixing the specific originality and/or fact-check problems that made the
+// draft fail its gates. Used by the "Redo with AI" action on drafts. Fail-soft:
+// on any failure it returns the original contentMd unchanged and rewritten:false,
+// so the caller never persists corrupted or truncated output.
+export interface RedoOriginalityIssue {
+  excerpt: string;
+  likely_source: string;
+  concern: string;
+}
+
+export interface RedoFactIssue {
+  claim: string;
+  concern: string;
+  severity: "low" | "medium" | "high";
+}
+
+const REDO_TOOL = {
+  name: "submit_regenerated_article",
+  description: "Submit the fully regenerated article body in markdown.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      content_md: {
+        type: "string",
+        description:
+          "The COMPLETE regenerated article body in markdown — every section rewritten in original " +
+          "wording, with the flagged originality and factual problems fixed. Same topic, heading " +
+          "structure, keywords, and sources; no fabricated figures.",
+      },
+    },
+    required: ["content_md"],
+  },
+};
+
+export async function regenerateDraftBody(input: {
+  contentMd: string;
+  sources: { url: string; title: string; publishedDate?: string }[];
+  originalityIssues: RedoOriginalityIssue[];
+  factIssues: RedoFactIssue[];
+}): Promise<{ content_md: string; rewritten: boolean; error?: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      content_md: input.contentMd,
+      rewritten: false,
+      error: "ANTHROPIC_API_KEY is not configured, so the redo could not run.",
+    };
+  }
+
+  const sourceBlock = input.sources.length
+    ? input.sources.map((s) => `- ${s.title} (${s.publishedDate ?? "date unknown"}): ${s.url}`).join("\n")
+    : "No sources were supplied — keep claims general and use no invented statistics.";
+
+  const originalityBlock = input.originalityIssues.length
+    ? input.originalityIssues
+        .map((i, n) => `${n + 1}. Passage: "${i.excerpt}"\n   Resembles: ${i.likely_source}\n   Concern: ${i.concern}`)
+        .join("\n\n")
+    : "None flagged.";
+
+  const factBlock = input.factIssues.length
+    ? input.factIssues
+        .map((i, n) => `${n + 1}. Claim: "${i.claim}"\n   Severity: ${i.severity}\n   Concern: ${i.concern}`)
+        .join("\n\n")
+    : "None flagged.";
+
+  const systemPrompt = `You are a senior editor rewriting a FreelanceAtlas article that FAILED its
+publishing gates. Regenerate the ENTIRE article body from scratch in your own words while keeping the
+same topic, the same overall section structure and heading levels, the same keywords, and the same
+sources. Your rewrite must fix BOTH problem sets below:
+
+ORIGINALITY: Do not reuse the wording of any source or of the current draft's flagged passages. Every
+sentence must be your own phrasing. Keep the same facts and points, but say them differently.
+
+ACCURACY: For every flagged factual claim, either correct it to what the sources actually support or
+remove the specific unsupported figure/claim entirely. Never invent a number, price, percentage, date,
+or statistic. If a specific figure cannot be supported by the listed sources, state it qualitatively
+instead (e.g. "many platforms charge a fee" rather than a made-up amount).
+
+Preserve markdown structure (##/### headings, lists, links that already appear). Do not add an H1.
+Never use em dashes, spaced hyphens, or double hyphens as dashes. Call submit_regenerated_article
+exactly once with the full rewritten body. Do not respond with plain text.`;
+
+  const userPrompt = `SOURCES THE ARTICLE WAS RESEARCHED FROM:
+${sourceBlock}
+
+CURRENT ARTICLE BODY (to be fully rewritten):
+${input.contentMd}
+
+ORIGINALITY PROBLEMS TO FIX:
+${originalityBlock}
+
+FACTUAL PROBLEMS TO FIX:
+${factBlock}
+
+Return the complete rewritten article body by calling submit_regenerated_article.`;
+
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system: systemPrompt,
+        tools: [REDO_TOOL],
+        tool_choice: { type: "tool", name: "submit_regenerated_article" },
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+      signal: AbortSignal.timeout(180000),
+    });
+  } catch (err: any) {
+    const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+    return {
+      content_md: input.contentMd,
+      rewritten: false,
+      error: timedOut
+        ? "Redo request timed out after 180s."
+        : `Redo request failed before completing: ${String(err?.message ?? err)}`,
+    };
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { content_md: input.contentMd, rewritten: false, error: `Redo request failed (${res.status}): ${text.slice(0, 200)}` };
+  }
+
+  const data = await res.json();
+  if (data.stop_reason === "max_tokens") {
+    return { content_md: input.contentMd, rewritten: false, error: "Redo was cut off because it exceeded the model's output limit." };
+  }
+
+  const toolUse = (data.content ?? []).find((b: any) => b.type === "tool_use");
+  if (!toolUse || typeof toolUse.input?.content_md !== "string" || !toolUse.input.content_md.trim()) {
+    return { content_md: input.contentMd, rewritten: false, error: "The redo model did not return a structured tool call." };
+  }
+
+  return { content_md: stripDashes(toolUse.input.content_md), rewritten: true };
+}
