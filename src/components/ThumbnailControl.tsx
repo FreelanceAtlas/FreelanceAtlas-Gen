@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { generateArticleThumbnail, redoArticleThumbnail } from "@/app/dashboard/actions";
 
@@ -12,48 +12,65 @@ import { generateArticleThumbnail, redoArticleThumbnail } from "@/app/dashboard/
 export default function ThumbnailControl({
   articleId,
   thumbnailUrl,
+  thumbnailStatus,
 }: {
   articleId: string;
   thumbnailUrl: string | null;
+  thumbnailStatus?: string | null;
 }) {
   const router = useRouter();
   const [url, setUrl] = useState<string | null>(thumbnailUrl);
-  const [pending, setPending] = useState(false);
+  const [localPending, setLocalPending] = useState(false);
   const [phase, setPhase] = useState<"generate" | "redo" | null>(null);
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // Keep the preview in sync when a poll refreshes the server prop.
+  useEffect(() => {
+    if (thumbnailUrl) setUrl(`${thumbnailUrl}?t=${Date.now()}`);
+  }, [thumbnailUrl]);
+
+  // Persisted processing state survives refresh: show the bar and poll until done.
+  const serverProcessing = thumbnailStatus === "processing";
+  const pending = localPending || serverProcessing;
+
+  useEffect(() => {
+    if (!serverProcessing) return;
+    const t = setInterval(() => router.refresh(), 4000);
+    return () => clearInterval(t);
+  }, [serverProcessing, router]);
+
   async function generate() {
     setError(null);
-    setPending(true);
+    setLocalPending(true);
     setPhase("generate");
     try {
       const r = await generateArticleThumbnail(articleId);
       setUrl(`${r.url}?t=${Date.now()}`); // cache-bust
-      router.refresh();
     } catch (e: any) {
       setError(e?.message ?? "Could not generate thumbnail.");
     } finally {
-      setPending(false);
+      setLocalPending(false);
       setPhase(null);
+      router.refresh();
     }
   }
 
   async function redo() {
     if (!note.trim()) return;
     setError(null);
-    setPending(true);
+    setLocalPending(true);
     setPhase("redo");
     try {
       const r = await redoArticleThumbnail(articleId, note.trim());
       setUrl(`${r.url}?t=${Date.now()}`);
       setNote("");
-      router.refresh();
     } catch (e: any) {
       setError(e?.message ?? "Could not redo thumbnail.");
     } finally {
-      setPending(false);
+      setLocalPending(false);
       setPhase(null);
+      router.refresh();
     }
   }
 

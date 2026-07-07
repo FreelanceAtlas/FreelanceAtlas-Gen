@@ -3,6 +3,11 @@ import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import { FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 import ArticlesManager, { ArticleRow } from "@/components/ArticlesManager";
 
+// Thumbnail generation and draft redo (invoked as server actions from this page)
+// run several sequential LLM/image round-trips, so give the invocation the max
+// runtime the plan allows rather than the short default (clamped by plan tier).
+export const maxDuration = 300;
+
 export default async function ArticlesPage() {
   const supabase = createClient();
 
@@ -48,6 +53,8 @@ export default async function ArticlesPage() {
       wpEditLink: a.wp_edit_link ?? null,
       wpStatus: a.wp_status ?? null,
       thumbnailUrl: a.thumbnail_url ?? null,
+      thumbnailStatus: a.thumbnail_status ?? null,
+      redoStatus: a.redo_status ?? null,
     };
   });
 

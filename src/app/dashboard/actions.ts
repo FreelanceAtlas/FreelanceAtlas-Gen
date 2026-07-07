@@ -113,29 +113,45 @@ export async function generateArticleThumbnail(articleId: string) {
     .single();
   if (error || !article) throw new Error(error?.message ?? "Article not found.");
 
-  const title = article.title || article.h1 || "";
-  const scene = await sceneForTitle(title);
-  const png = await renderThumbnail(scene);
-  const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
-
-  const { error: saveError } = await supabase
-    .from("articles")
-    .update({ thumbnail_media_id: mediaId, thumbnail_url: url, thumbnail_scene: JSON.stringify(scene) })
-    .eq("id", articleId);
-
-  // The image was uploaded to WP, but if we can't persist the media id/url the
-  // thumbnail would vanish on refresh and never attach as the featured image.
-  // Surface that loudly instead of silently succeeding (usually means the
-  // thumbnail_* columns are missing — run migrations/add_thumbnail_columns.sql).
-  if (saveError) {
-    throw new Error(
-      `Thumbnail rendered and uploaded to WordPress (media #${mediaId}), but could not be saved to the article: ${saveError.message}. ` +
-        `If this mentions a missing column, run migrations/add_thumbnail_columns.sql in Supabase.`
-    );
-  }
-
+  // Persist a "processing" flag up front so that if the editor refreshes mid-run
+  // the UI can show the in-progress state and poll for completion, instead of
+  // losing it. This commits immediately, so a concurrent page load sees it even
+  // while the (still-running) generation continues.
+  await supabase.from("articles").update({ thumbnail_status: "processing" }).eq("id", articleId);
   revalidatePath("/dashboard/articles");
-  return { url, mediaId };
+
+  try {
+    const title = article.title || article.h1 || "";
+    const scene = await sceneForTitle(title);
+    const png = await renderThumbnail(scene);
+    const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
+
+    const { error: saveError } = await supabase
+      .from("articles")
+      .update({
+        thumbnail_media_id: mediaId,
+        thumbnail_url: url,
+        thumbnail_scene: JSON.stringify(scene),
+        thumbnail_status: null,
+      })
+      .eq("id", articleId);
+
+    // The image was uploaded to WP, but if we can't persist the media id/url the
+    // thumbnail would vanish on refresh and never attach as the featured image.
+    if (saveError) {
+      await supabase.from("articles").update({ thumbnail_status: "error" }).eq("id", articleId);
+      throw new Error(
+        `Thumbnail rendered and uploaded to WordPress (media #${mediaId}), but could not be saved to the article: ${saveError.message}.`
+      );
+    }
+
+    revalidatePath("/dashboard/articles");
+    return { url, mediaId };
+  } catch (e) {
+    await supabase.from("articles").update({ thumbnail_status: "error" }).eq("id", articleId).then(() => {}, () => {});
+    revalidatePath("/dashboard/articles");
+    throw e;
+  }
 }
 
 // Redoes an article's thumbnail from a change note: pulls the last generated
@@ -152,30 +168,39 @@ export async function redoArticleThumbnail(articleId: string, changeNote: string
   if (error || !article) throw new Error(error?.message ?? "Article not found.");
   if (!article.thumbnail_url) throw new Error("Generate a thumbnail first before redoing it.");
 
-  const title = article.title || article.h1 || "";
-  let header = title;
-  try {
-    header = JSON.parse(article.thumbnail_scene || "{}").header || title;
-  } catch {}
-
-  const prev = await fetchImageAsBase64(article.thumbnail_url);
-  const png = await editThumbnail(prev, changeNote, header);
-  const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
-
-  const { error: saveError } = await supabase
-    .from("articles")
-    .update({ thumbnail_media_id: mediaId, thumbnail_url: url })
-    .eq("id", articleId);
-
-  if (saveError) {
-    throw new Error(
-      `New thumbnail uploaded to WordPress (media #${mediaId}), but could not be saved to the article: ${saveError.message}. ` +
-        `If this mentions a missing column, run migrations/add_thumbnail_columns.sql in Supabase.`
-    );
-  }
-
+  await supabase.from("articles").update({ thumbnail_status: "processing" }).eq("id", articleId);
   revalidatePath("/dashboard/articles");
-  return { url, mediaId };
+
+  try {
+    const title = article.title || article.h1 || "";
+    let header = title;
+    try {
+      header = JSON.parse(article.thumbnail_scene || "{}").header || title;
+    } catch {}
+
+    const prev = await fetchImageAsBase64(article.thumbnail_url);
+    const png = await editThumbnail(prev, changeNote, header);
+    const { mediaId, url } = await uploadThumbnailToWp(png, `${article.slug || "article"}-thumb`, title);
+
+    const { error: saveError } = await supabase
+      .from("articles")
+      .update({ thumbnail_media_id: mediaId, thumbnail_url: url, thumbnail_status: null })
+      .eq("id", articleId);
+
+    if (saveError) {
+      await supabase.from("articles").update({ thumbnail_status: "error" }).eq("id", articleId);
+      throw new Error(
+        `New thumbnail uploaded to WordPress (media #${mediaId}), but could not be saved to the article: ${saveError.message}.`
+      );
+    }
+
+    revalidatePath("/dashboard/articles");
+    return { url, mediaId };
+  } catch (e) {
+    await supabase.from("articles").update({ thumbnail_status: "error" }).eq("id", articleId).then(() => {}, () => {});
+    revalidatePath("/dashboard/articles");
+    throw e;
+  }
 }
 
 export async function updateAffiliateLink(id: string, url: string, isActive: boolean) {
@@ -490,21 +515,32 @@ export async function redoDraftArticle(articleId: string): Promise<{
     };
   }
 
-  // Regenerate the whole body, feeding in whichever checks are failing so the
-  // model targets the actual problems. If a check is passing we still pass its
-  // (empty) issues so the rewrite doesn't undo what already works.
-  const redo = await regenerateDraftBody({
-    contentMd: article.content_md ?? "",
-    sources,
-    originalityIssues: originalityFailing ? originality?.issues ?? [] : [],
-    factIssues: factFailing ? factCheck?.issues ?? [] : [],
-  });
+  // Persist a "processing" flag so a mid-run refresh shows the redo in progress
+  // and can poll for completion instead of losing it.
+  await supabase.from("articles").update({ redo_status: "processing" }).eq("id", articleId);
+  revalidatePath("/dashboard/articles");
 
-  if (!redo.rewritten) {
-    throw new Error(redo.error ?? "Redo did not produce a rewrite.");
+  let cleanedContent: string;
+  try {
+    // Regenerate the whole body, feeding in whichever checks are failing so the
+    // model targets the actual problems. If a check is passing we still pass its
+    // (empty) issues so the rewrite doesn't undo what already works.
+    const redo = await regenerateDraftBody({
+      contentMd: article.content_md ?? "",
+      sources,
+      originalityIssues: originalityFailing ? originality?.issues ?? [] : [],
+      factIssues: factFailing ? factCheck?.issues ?? [] : [],
+    });
+
+    if (!redo.rewritten) {
+      throw new Error(redo.error ?? "Redo did not produce a rewrite.");
+    }
+    cleanedContent = stripDashes(redo.content_md);
+  } catch (e) {
+    await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
+    revalidatePath("/dashboard/articles");
+    throw e;
   }
-
-  const cleanedContent = stripDashes(redo.content_md);
 
   // Re-score both checks neutrally against the fresh content.
   const [originalityCheck, newFactCheck] = await Promise.all([
@@ -518,10 +554,14 @@ export async function redoDraftArticle(articleId: string): Promise<{
       content_md: cleanedContent,
       originality_check: originalityCheck,
       fact_check: newFactCheck,
+      redo_status: null,
     })
     .eq("id", articleId);
 
-  if (updateError) throw new Error(updateError.message);
+  if (updateError) {
+    await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
+    throw new Error(updateError.message);
+  }
 
   const nowOriginalityOk =
     !originalityCheck.needs_review && originalityCheck.originality_score >= ORIGINALITY_PASS_THRESHOLD;

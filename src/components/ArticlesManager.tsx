@@ -1,8 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+
+// While a persisted operation (thumbnail/redo) is "processing", re-fetch the
+// server components every few seconds so the row updates itself the moment the
+// background work finishes — even if the user refreshed mid-run.
+function usePollWhileProcessing(processing: boolean) {
+  const router = useRouter();
+  useEffect(() => {
+    if (!processing) return;
+    const t = setInterval(() => router.refresh(), 4000);
+    return () => clearInterval(t);
+  }, [processing, router]);
+}
 import { scheduleArticle, unscheduleArticle, bulkDeleteArticles, redoDraftArticle } from "@/app/dashboard/actions";
 import SendToWordPressButton from "@/components/SendToWordPressButton";
 import PublishToSiteButton from "@/components/PublishToSiteButton";
@@ -24,6 +36,8 @@ export interface ArticleRow {
   wpEditLink: string | null;
   wpStatus: string | null;
   thumbnailUrl: string | null;
+  thumbnailStatus: string | null;
+  redoStatus: string | null;
 }
 
 function formatScheduled(iso: string) {
@@ -69,26 +83,33 @@ function ScoreBadges({ row }: { row: ArticleRow }) {
 // into "Ready to publish" on refresh.
 function RedoDraftButton({ row }: { row: ArticleRow }) {
   const router = useRouter();
-  const [pending, setPending] = useState(false);
+  const [localPending, setLocalPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
+  // Persisted processing state survives a refresh: if the server marked this row
+  // redo_status='processing', show it and poll until it clears.
+  const serverProcessing = row.redoStatus === "processing";
+  const pending = localPending || serverProcessing;
+
+  usePollWhileProcessing(serverProcessing);
+
   async function run() {
-    setPending(true);
+    setLocalPending(true);
     setError(null);
     setNote(null);
     try {
       const r = await redoDraftArticle(row.id);
-      if (r.promoted) {
-        setNote("Passed — moving to Ready");
-      } else {
-        setNote(`Still below gate (Orig ${r.originalityScore ?? "—"}, Fact ${r.factCheckScore ?? "—"})`);
-      }
-      router.refresh();
+      setNote(
+        r.promoted
+          ? "Passed — moving to Ready"
+          : `Still below gate (Orig ${r.originalityScore ?? "—"}, Fact ${r.factCheckScore ?? "—"})`
+      );
     } catch (e: any) {
       setError(e?.message ?? "Redo failed");
     } finally {
-      setPending(false);
+      setLocalPending(false);
+      router.refresh();
     }
   }
 
@@ -100,7 +121,7 @@ function RedoDraftButton({ row }: { row: ArticleRow }) {
         title="Regenerate this draft with AI to fix failing originality/fact checks, then re-score"
         className="rounded-md bg-atlasnavy px-2 py-0.5 text-[11px] font-medium text-white hover:bg-atlasnavy/90 disabled:opacity-50"
       >
-        {pending ? "Redoing…" : "Redo with AI"}
+        {pending ? "Redoing…" : row.redoStatus === "error" ? "Retry redo" : "Redo with AI"}
       </button>
       {note && <span className="text-[11px] text-atlasnavy/50">{note}</span>}
       {error && <span className="text-[11px] text-red-600">{error}</span>}
@@ -449,7 +470,13 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
         selected={selected}
         setSelected={setSelected}
         renderExtra={(row) => <SendToWordPressButton articleId={row.id} compact />}
-        renderFooter={(row) => <ThumbnailControl articleId={row.id} thumbnailUrl={row.thumbnailUrl} />}
+        renderFooter={(row) => (
+          <ThumbnailControl
+            articleId={row.id}
+            thumbnailUrl={row.thumbnailUrl}
+            thumbnailStatus={row.thumbnailStatus}
+          />
+        )}
       />
 
       <SelectableSection
