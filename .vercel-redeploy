@@ -1,1 +1,1 @@
-Trigger redeploy after adding env vars directly at project level
+Trigger redeploy: add OpenRouter + WordPress env vars (project level)
