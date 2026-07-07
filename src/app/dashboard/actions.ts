@@ -13,7 +13,12 @@ import {
   uploadThumbnailToWp,
   fetchImageAsBase64,
 } from "@/lib/thumbnail";
-import { regenerateDraftBody } from "@/lib/generate";
+import {
+  regenerateDraftBody,
+  redactFiguresFlaggedByFactCheck,
+  redactDescriptiveClaimsFlaggedByFactCheck,
+  type GeneratedArticle,
+} from "@/lib/generate";
 
 // Formats a ready article into the live theme's `.doc` HTML (via OpenRouter)
 // and pushes it to freelanceatlas.com as a WordPress DRAFT. Returns the WP
@@ -520,11 +525,15 @@ export async function redoDraftArticle(articleId: string): Promise<{
   await supabase.from("articles").update({ redo_status: "processing" }).eq("id", articleId);
   revalidatePath("/dashboard/articles");
 
+  const oldOrig = originality?.originality_score ?? 0;
+  const oldFact = factCheck?.accuracy_score ?? 0;
+
   let cleanedContent: string;
   try {
-    // Regenerate the whole body, feeding in whichever checks are failing so the
-    // model targets the actual problems. If a check is passing we still pass its
-    // (empty) issues so the rewrite doesn't undo what already works.
+    // Targeted fix: hand the model the article plus the EXACT flagged issues and
+    // have it change only those passages/claims, leaving the rest verbatim. (A
+    // full-article regeneration was introducing brand-new issues and lowering the
+    // score, which is why this is surgical, not a rewrite.)
     const redo = await regenerateDraftBody({
       contentMd: article.content_md ?? "",
       sources,
@@ -536,17 +545,59 @@ export async function redoDraftArticle(articleId: string): Promise<{
       throw new Error(redo.error ?? "Redo did not produce a rewrite.");
     }
     cleanedContent = stripDashes(redo.content_md);
+
+    // Deterministic backstop: strip/qualify any flagged figures the model didn't
+    // fully remove, keyed off the exact fact-check issues (same logic generation
+    // uses). Only touches flagged numbers, so it can't regress unflagged text.
+    if (factFailing && (factCheck?.issues?.length ?? 0) > 0) {
+      const asArticle: GeneratedArticle = {
+        title: "",
+        meta_title: "",
+        meta_description: "",
+        h1: "",
+        content_md: cleanedContent,
+        faqs: [],
+        keywords_used: [],
+        keyword_usage: [],
+      };
+      const figured = redactFiguresFlaggedByFactCheck(asArticle, factCheck!.issues!, {}, "");
+      const descRedacted = redactDescriptiveClaimsFlaggedByFactCheck(figured, factCheck!.issues!);
+      cleanedContent = stripDashes(descRedacted.content_md);
+    }
   } catch (e) {
     await supabase.from("articles").update({ redo_status: "error" }).eq("id", articleId).then(() => {}, () => {});
     revalidatePath("/dashboard/articles");
     throw e;
   }
 
-  // Re-score both checks neutrally against the fresh content.
+  // Re-score both checks neutrally against the fixed content.
   const [originalityCheck, newFactCheck] = await Promise.all([
     checkOriginality(cleanedContent, sources),
     factCheckArticle(cleanedContent, faqs, sources),
   ]);
+
+  const nowOriginalityOk =
+    !originalityCheck.needs_review && originalityCheck.originality_score >= ORIGINALITY_PASS_THRESHOLD;
+  const nowFactOk = !newFactCheck.needs_review && newFactCheck.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
+  const nowPasses = nowOriginalityOk && nowFactOk;
+
+  // Regression guard: if the fixed version doesn't pass AND scored lower on either
+  // dimension than before, discard it and keep the original draft. This stops a
+  // redo from ever lowering the score and makes repeated redos converge instead of
+  // wandering. (If it now passes, we always keep it even if one number dipped.)
+  const regressed = originalityCheck.originality_score < oldOrig || newFactCheck.accuracy_score < oldFact;
+  if (!nowPasses && regressed) {
+    await supabase.from("articles").update({ redo_status: null }).eq("id", articleId);
+    revalidatePath("/dashboard/articles");
+    revalidatePath(`/dashboard/articles/${article.slug}`);
+    return {
+      ranRedo: true,
+      promoted: false,
+      originalityScore: oldOrig,
+      factCheckScore: oldFact,
+      message: `Redo would have lowered the score (Orig ${originalityCheck.originality_score}, Fact ${newFactCheck.accuracy_score}), so the original draft was kept. Try again.`,
+    };
+  }
 
   const { error: updateError } = await supabase
     .from("articles")
@@ -563,16 +614,12 @@ export async function redoDraftArticle(articleId: string): Promise<{
     throw new Error(updateError.message);
   }
 
-  const nowOriginalityOk =
-    !originalityCheck.needs_review && originalityCheck.originality_score >= ORIGINALITY_PASS_THRESHOLD;
-  const nowFactOk = !newFactCheck.needs_review && newFactCheck.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
-
   revalidatePath("/dashboard/articles");
   revalidatePath(`/dashboard/articles/${article.slug}`);
 
   return {
     ranRedo: true,
-    promoted: nowOriginalityOk && nowFactOk,
+    promoted: nowPasses,
     originalityScore: originalityCheck.originality_score,
     factCheckScore: newFactCheck.accuracy_score,
   };

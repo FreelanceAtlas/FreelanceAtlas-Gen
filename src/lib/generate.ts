@@ -1411,17 +1411,18 @@ export interface RedoFactIssue {
 }
 
 const REDO_TOOL = {
-  name: "submit_regenerated_article",
-  description: "Submit the fully regenerated article body in markdown.",
+  name: "submit_fixed_article",
+  description: "Submit the full article body with ONLY the flagged passages fixed.",
   input_schema: {
     type: "object" as const,
     properties: {
       content_md: {
         type: "string",
         description:
-          "The COMPLETE regenerated article body in markdown — every section rewritten in original " +
-          "wording, with the flagged originality and factual problems fixed. Same topic, heading " +
-          "structure, keywords, and sources; no fabricated figures.",
+          "The COMPLETE article body in markdown, identical to the original EXCEPT that the flagged " +
+          "originality passages have been reworded and the flagged inaccurate claims corrected or " +
+          "removed. Every sentence, heading, and list item that was NOT flagged must be reproduced " +
+          "verbatim, unchanged.",
       },
     },
     required: ["content_md"],
@@ -1459,36 +1460,39 @@ export async function regenerateDraftBody(input: {
         .join("\n\n")
     : "None flagged.";
 
-  const systemPrompt = `You are a senior editor rewriting a FreelanceAtlas article that FAILED its
-publishing gates. Regenerate the ENTIRE article body from scratch in your own words while keeping the
-same topic, the same overall section structure and heading levels, the same keywords, and the same
-sources. Your rewrite must fix BOTH problem sets below:
+  const systemPrompt = `You are a senior editor fixing the SPECIFIC problems an automated check flagged
+on a FreelanceAtlas article. You will get the full article body plus an exact list of flagged
+passages/claims. Fix ONLY those flagged items. This is a surgical edit, not a rewrite.
 
-ORIGINALITY: Do not reuse the wording of any source or of the current draft's flagged passages. Every
-sentence must be your own phrasing. Keep the same facts and points, but say them differently.
+CRITICAL: Reproduce every sentence, heading, and list item that was NOT flagged completely unchanged,
+verbatim. Do not "improve", re-order, or re-word anything that wasn't flagged. Changing unflagged text
+risks introducing NEW problems and lowering the score, which is the opposite of the goal.
 
-ACCURACY: For every flagged factual claim, either correct it to what the sources actually support or
-remove the specific unsupported figure/claim entirely. Never invent a number, price, percentage, date,
-or statistic. If a specific figure cannot be supported by the listed sources, state it qualitatively
-instead (e.g. "many platforms charge a fee" rather than a made-up amount).
+For each ORIGINALITY passage: reword just that passage so it is no longer a verbatim or near-verbatim
+copy of the source, keeping the same fact/point and roughly the same length, fitting the surrounding
+structure.
 
-Preserve markdown structure (##/### headings, lists, links that already appear). Do not add an H1.
-Never use em dashes, spaced hyphens, or double hyphens as dashes. Call submit_regenerated_article
-exactly once with the full rewritten body. Do not respond with plain text.`;
+For each FACTUAL claim: correct it to what the listed sources actually support, or if no source
+supports the specific figure, remove that figure and state it qualitatively (e.g. "many platforms
+charge a fee" instead of an invented amount). Never invent a number, price, percentage, or date.
+
+Do not add an H1. Never use em dashes, spaced hyphens, or double hyphens as dashes. Call
+submit_fixed_article exactly once with the full body (fixed passages changed, everything else verbatim).
+Do not respond with plain text.`;
 
   const userPrompt = `SOURCES THE ARTICLE WAS RESEARCHED FROM:
 ${sourceBlock}
 
-CURRENT ARTICLE BODY (to be fully rewritten):
+FULL ARTICLE BODY (change ONLY the flagged passages below; reproduce everything else verbatim):
 ${input.contentMd}
 
-ORIGINALITY PROBLEMS TO FIX:
+FLAGGED ORIGINALITY PASSAGES TO REWORD:
 ${originalityBlock}
 
-FACTUAL PROBLEMS TO FIX:
+FLAGGED FACTUAL CLAIMS TO CORRECT OR REMOVE:
 ${factBlock}
 
-Return the complete rewritten article body by calling submit_regenerated_article.`;
+Return the full article body with only these flagged items fixed, by calling submit_fixed_article.`;
 
   let res: Response;
   try {
@@ -1504,7 +1508,7 @@ Return the complete rewritten article body by calling submit_regenerated_article
         max_tokens: 8192,
         system: systemPrompt,
         tools: [REDO_TOOL],
-        tool_choice: { type: "tool", name: "submit_regenerated_article" },
+        tool_choice: { type: "tool", name: "submit_fixed_article" },
         messages: [{ role: "user", content: userPrompt }],
       }),
       signal: AbortSignal.timeout(180000),
