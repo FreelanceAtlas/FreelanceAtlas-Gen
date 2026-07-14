@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 interface Cluster { id: string; name: string; }
@@ -134,6 +134,26 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
 
   const clusterKeywords = keywords.filter((k) => k.cluster_id === clusterId);
   const unusedClusterKeywords = clusterKeywords.filter((k) => !k.is_used);
+
+  // Auto-research: once a primary keyword is set (typed, picked from the bank, or
+  // suggested), draft the outline and run keyword research automatically — no click
+  // needed. Debounced so typing doesn't fire a DataForSEO call per keystroke, and
+  // each exact topic is only researched once (the Step 1 button re-runs manually).
+  const lastAutoResearched = useRef<string>("");
+  useEffect(() => {
+    const kw = primaryKeyword.trim();
+    if (!kw || kw.length < 4 || !clusterId) return;
+    if (kw.toLowerCase() === lastAutoResearched.current) return;
+    if (fetchingOutline || fetchingDFS || loading) return;
+    const timer = setTimeout(() => {
+      lastAutoResearched.current = kw.toLowerCase();
+      setSupporting(""); // fresh topic → fresh supporting list
+      setSuggestionMessage(null);
+      handleDraftAndResearch();
+    }, 1200);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [primaryKeyword, clusterId, fetchingOutline, fetchingDFS, loading]);
 
   // AI-suggested topics (research_source = "ai-suggested") show in the bank and are clickable
   // They're already in clusterKeywords — the bank chips below handle them
@@ -353,14 +373,19 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         {/* Step 1: Draft outline */}
         <div>
           <div className="flex items-center justify-between">
-            <label className="block text-sm font-medium text-atlasnavy">Step 1 — Draft outline</label>
+            <label className="block text-sm font-medium text-atlasnavy">Step 1 — Outline &amp; keywords (runs automatically)</label>
             <button type="button" onClick={handleDraftAndResearch}
               disabled={fetchingOutline || fetchingDFS || !primaryKeyword}
               className="shrink-0 rounded-md border border-atlasteal px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50">
               {fetchingOutline ? "Drafting outline…" : fetchingDFS ? "Researching keywords…"
-                : outline.length > 0 ? "Re-draft outline + keywords" : "Draft outline + find keywords"}
+                : outline.length > 0 ? "Re-run outline + keywords" : "Run now"}
             </button>
           </div>
+          {!outline.length && !fetchingOutline && !fetchingDFS && (
+            <p className="mt-1 text-xs text-atlasnavy/40">
+              Starts on its own a moment after you set the primary keyword.
+            </p>
+          )}
           {outlineError && <p className="mt-1 text-xs text-red-600">{outlineError}</p>}
           {outline.length > 0 && (
             <div className="mt-2 rounded-md border border-atlasnavy/10 bg-atlasnavy/[0.02] px-3 py-2">
@@ -375,7 +400,7 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         {/* Step 2: Supporting keywords */}
         <div>
           <div className="flex items-center justify-between">
-            <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (comma separated)</label>
+            <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (auto-assigned, comma separated)</label>
             <div className="flex items-center gap-1.5">
               <button type="button" onClick={suggestSupportingKeywords}
                 disabled={!primaryKeyword || unusedClusterKeywords.length === 0}
