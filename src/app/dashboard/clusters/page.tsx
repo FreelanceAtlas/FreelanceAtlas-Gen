@@ -38,7 +38,7 @@ export default async function ClustersPage() {
 
       <div className="mt-6 grid grid-cols-2 gap-6">
         {(clusters ?? []).map((c) => (
-          <div key={c.id} className="rounded-xl bg-white p-5 shadow-sm">
+          <div key={c.id} className="rounded-2xl border border-atlasnavy/5 bg-white p-5 shadow-sm">
             <p className="font-semibold text-atlasnavy">{c.name}</p>
             <p className="text-xs text-atlasteal">{c.pillar_keyword}</p>
             <p className="mt-2 text-sm text-atlasnavy/70">{c.description}</p>

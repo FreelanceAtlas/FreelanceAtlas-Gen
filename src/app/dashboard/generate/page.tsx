@@ -10,12 +10,14 @@ export default async function GeneratePage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-atlasnavy">Generate a new post</h1>
-      <p className="mt-1 text-sm text-atlasnavy/60">
-        Every topic is checked against existing FreelanceAtlas posts and prior drafts before
-        anything is written, so the same angle never gets published twice.
-      </p>
-      <div className="mt-6">
+      <div className="mx-auto max-w-3xl text-center">
+        <h1 className="text-3xl font-bold tracking-tight text-atlasnavy">Generate a new post</h1>
+        <p className="mx-auto mt-2 max-w-xl text-sm text-atlasnavy/60">
+          Pick a topic and the rest flows on its own — outline, keyword research, sources,
+          duplicate checks, fact-checking, and internal links all happen automatically.
+        </p>
+      </div>
+      <div className="mt-8">
         <GenerateForm clusters={clusters ?? []} keywords={keywords ?? []} />
       </div>
     </div>

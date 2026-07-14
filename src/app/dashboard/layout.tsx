@@ -1,12 +1,13 @@
-import Sidebar from "@/components/Sidebar";
+import TopNav from "@/components/TopNav";
+import { logout } from "@/app/access/actions";
 
 export const dynamic = "force-dynamic";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen">
-      <Sidebar />
-      <main className="flex-1 p-8">{children}</main>
+    <div className="min-h-screen">
+      <TopNav onLogout={logout} />
+      <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
     </div>
   );
 }

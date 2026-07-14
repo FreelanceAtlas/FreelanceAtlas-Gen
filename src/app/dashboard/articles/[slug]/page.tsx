@@ -104,7 +104,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl bg-white p-4 text-sm shadow-sm">
+      <div className="mt-4 rounded-2xl border border-atlasnavy/5 bg-white p-4 text-sm shadow-sm">
         <p><span className="font-semibold text-atlasnavy">Meta title:</span> {article.meta_title}</p>
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Meta description:</span> {article.meta_description}</p>
         <p className="mt-1"><span className="font-semibold text-atlasnavy">Slug:</span> /{article.slug}</p>
@@ -227,7 +227,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       )}
 
       <article
-        className="prose prose-base mt-6 max-w-none rounded-xl bg-white p-6 shadow-sm
+        className="prose prose-base mt-6 max-w-none rounded-2xl border border-atlasnavy/5 bg-white p-6 shadow-sm
           prose-headings:font-bold prose-headings:text-atlasnavy
           prose-h1:mt-0 prose-h1:text-3xl
           prose-h2:mt-10 prose-h2:text-2xl prose-h2:border-b prose-h2:border-atlasnavy/10 prose-h2:pb-2
@@ -242,7 +242,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       />
 
       {article.faqs?.length > 0 && (
-        <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+        <div className="mt-6 rounded-2xl border border-atlasnavy/5 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-atlasnavy">FAQs</h2>
           <dl className="mt-3 space-y-4">
             {article.faqs.map((f: any, i: number) => (
@@ -255,7 +255,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         </div>
       )}
 
-      <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+      <div className="mt-6 rounded-2xl border border-atlasnavy/5 bg-white p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-atlasnavy">Keyword reference table</h2>
         <p className="mt-1 text-xs text-atlasnavy/50">
           {showMarkers
@@ -304,7 +304,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       </div>
 
       {article.internal_links_used?.length > 0 && (
-        <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+        <div className="mt-6 rounded-2xl border border-atlasnavy/5 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-atlasnavy">Internal links applied</h2>
           <p className="mt-1 text-xs text-atlasnavy/50">
             Keywords already covered by another live blog were auto-linked to it (first mention only).
@@ -324,7 +324,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       )}
 
       {article.affiliate_links_used?.length > 0 && (
-        <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+        <div className="mt-6 rounded-2xl border border-atlasnavy/5 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-atlasnavy">Affiliate links applied</h2>
           <p className="mt-1 text-xs text-atlasnavy/50">
             Auto-inserted the first time each tool below was mentioned in the article.
@@ -344,7 +344,7 @@ export default async function ArticleDetail({ params }: { params: { slug: string
       )}
 
       {article.sources?.length > 0 && (
-        <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+        <div className="mt-6 rounded-2xl border border-atlasnavy/5 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-atlasnavy">Sources</h2>
           <ul className="mt-2 list-disc pl-5 text-sm">
             {article.sources.map((s: any, i: number) => (

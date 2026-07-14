@@ -317,7 +317,7 @@ function SelectableSection({
           )}
         </div>
       </div>
-      <ul className="mt-2 divide-y divide-atlasnavy/10 rounded-xl bg-white shadow-sm">
+      <ul className="mt-2 divide-y divide-atlasnavy/10 rounded-2xl border border-atlasnavy/5 bg-white shadow-sm">
         {rows.map((row) => (
           <ArticleRowItem
             key={row.id}
@@ -549,7 +549,7 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
 
       <div>
         <h2 className="text-sm font-semibold text-atlasnavy">Published</h2>
-        <ul className="mt-2 divide-y divide-atlasnavy/10 rounded-xl bg-white shadow-sm">
+        <ul className="mt-2 divide-y divide-atlasnavy/10 rounded-2xl border border-atlasnavy/5 bg-white shadow-sm">
           {published.map((row) => (
             <li key={row.id} className="flex items-center justify-between px-5 py-3 text-sm">
               <Link href={`/dashboard/articles/${row.slug}`} className="font-medium text-atlasnavy hover:underline">

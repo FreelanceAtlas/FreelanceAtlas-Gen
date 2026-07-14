@@ -19,7 +19,7 @@ export default async function AffiliateLinksPage() {
         <AddAffiliateLinkForm />
       </div>
 
-      <div className="overflow-x-auto rounded-xl bg-white p-5 shadow-sm">
+      <div className="overflow-x-auto rounded-2xl border border-atlasnavy/5 bg-white p-5 shadow-sm">
         <table className="w-full text-left">
           <thead>
             <tr className="text-xs uppercase tracking-wide text-atlasnavy/40">

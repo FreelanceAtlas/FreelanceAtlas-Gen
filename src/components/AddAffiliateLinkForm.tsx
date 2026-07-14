@@ -46,7 +46,7 @@ export default function AddAffiliateLinkForm() {
   }
 
   return (
-    <div className="mb-6 rounded-xl bg-white p-5 shadow-sm">
+    <div className="mb-6 rounded-2xl border border-atlasnavy/5 bg-white p-5 shadow-sm">
       <h2 className="text-sm font-semibold text-atlasnavy">Add a new tool to the bank</h2>
       <p className="mt-1 text-xs text-atlasnavy/50">
         New tools start with no URL, so the generator will just mention the tool by name until you

@@ -3,8 +3,8 @@
 @tailwind utilities;
 
 body {
-  background-color: #F6F1E7;
-  color: #0F2A43;
+  background-color: #F5F7F9;
+  color: #052335;
 }
 
 /* Indeterminate loading bar used while a thumbnail is generating. */
@@ -14,7 +14,7 @@ body {
   width: 100%;
   overflow: hidden;
   border-radius: 9999px;
-  background: rgba(15, 42, 67, 0.1);
+  background: rgba(5, 35, 53, 0.1);
 }
 .progress-track::after {
   content: "";
@@ -24,7 +24,7 @@ body {
   left: -45%;
   width: 45%;
   border-radius: 9999px;
-  background: #2CA6A4;
+  background: #296488;
   animation: progress-indeterminate 1.1s ease-in-out infinite;
 }
 @keyframes progress-indeterminate {

@@ -42,10 +42,60 @@ function fmtVol(v: number | null) {
 }
 
 const TIER_CONFIG = {
-  recommended: { label: "Most recommended", color: "bg-green-50 border-green-200", badge: "bg-green-100 text-green-700", defaultOpen: true },
-  related:     { label: "Related",          color: "bg-atlasteal/5 border-atlasteal/20", badge: "bg-atlasteal/10 text-atlasteal", defaultOpen: true },
+  recommended: { label: "Most recommended", color: "bg-atlassky/40 border-atlasteal/30", badge: "bg-atlasteal text-white", defaultOpen: true },
+  related:     { label: "Related",          color: "bg-atlascloud border-atlasnavy/10", badge: "bg-atlasnavy/10 text-atlasnavy", defaultOpen: true },
   check:       { label: "Check before adding", color: "bg-amber-50 border-amber-200", badge: "bg-amber-100 text-amber-700", defaultOpen: false },
 } as const;
+
+type StepState = "todo" | "active" | "busy" | "done";
+
+// One node in the guided flow: number circle (→ spinner → check) on a vertical
+// connector line, mirroring the site's clean numbered-list aesthetic.
+function Step({
+  n, title, hint, state, last = false, children,
+}: {
+  n: number;
+  title: string;
+  hint?: string;
+  state: StepState;
+  last?: boolean;
+  children: React.ReactNode;
+}) {
+  const circle =
+    state === "done" ? "border-atlasteal bg-atlasteal text-white"
+    : state === "busy" ? "border-atlasteal bg-white text-atlasteal"
+    : state === "active" ? "border-atlasnavy bg-atlasnavy text-white"
+    : "border-atlasnavy/20 bg-white text-atlasnavy/40";
+
+  return (
+    <div className="relative flex gap-4">
+      {!last && <div className="absolute bottom-0 left-[15px] top-9 w-px bg-atlasnavy/10" />}
+      <div className={`z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-2 text-sm font-bold transition-colors ${circle}`}>
+        {state === "done" ? (
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2.5}>
+            <path d="M3 8.5 6.5 12 13 4.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : state === "busy" ? (
+          <svg viewBox="0 0 16 16" className="h-4 w-4 animate-spin" fill="none" stroke="currentColor" strokeWidth={2}>
+            <circle cx="8" cy="8" r="6" strokeOpacity={0.25} />
+            <path d="M14 8a6 6 0 0 0-6-6" strokeLinecap="round" />
+          </svg>
+        ) : (
+          n
+        )}
+      </div>
+      <div className={`min-w-0 flex-1 ${last ? "" : "pb-8"}`}>
+        <div className="flex h-8 items-center gap-2">
+          <h2 className="text-sm font-bold text-atlasnavy">{title}</h2>
+          {hint && <span className="text-xs text-atlasnavy/40">{hint}</span>}
+        </div>
+        <div className={`mt-2 transition-opacity ${state === "todo" ? "pointer-events-none opacity-40" : "opacity-100"}`}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function KwChip({ kw, selected, onToggle }: { kw: DFSKeyword; selected: boolean; onToggle: () => void }) {
   return (
@@ -320,201 +370,211 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
     router.push(`/dashboard/articles/${data.article.slug}`);
   }
 
+  const researching = fetchingOutline || fetchingDFS;
+  const step1: StepState = primaryKeyword ? "done" : "active";
+  const step2: StepState = researching
+    ? "busy"
+    : outline.length > 0 || supporting.trim()
+    ? "done"
+    : primaryKeyword
+    ? "active"
+    : "todo";
+  const step3: StepState = fetchingSources
+    ? "busy"
+    : sourcesText.trim()
+    ? "done"
+    : primaryKeyword
+    ? "active"
+    : "todo";
+  const step4: StepState = loading ? "busy" : primaryKeyword ? "active" : "todo";
+
+  const inputCls =
+    "w-full rounded-lg border border-atlasnavy/15 bg-white px-3.5 py-2.5 text-sm text-atlasnavy placeholder:text-atlasnavy/30 focus:border-atlasteal focus:outline-none focus:ring-2 focus:ring-atlasteal/20";
+  const ghostBtn =
+    "shrink-0 rounded-full border border-atlasnavy/15 px-3.5 py-1.5 text-xs font-semibold text-atlasnavy/70 transition-colors hover:bg-atlasnavy/5 hover:text-atlasnavy disabled:opacity-40";
+  const tealBtn =
+    "shrink-0 rounded-full border border-atlasteal/40 px-3.5 py-1.5 text-xs font-semibold text-atlasteal transition-colors hover:bg-atlassky/50 disabled:opacity-40";
+
   return (
-    <div className="max-w-2xl">
-      <div className="space-y-4 rounded-xl bg-white p-6 shadow-sm">
-        {/* Cluster */}
-        <div>
-          <label className="block text-sm font-medium text-atlasnavy">Cluster</label>
-          <select value={clusterId} onChange={(e) => setClusterId(e.target.value)}
-            className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm">
-            {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          {clusterKeywords.length > 0 && (
-            <div className="mt-2">
-              <p className="text-xs text-atlasnavy/50">Bank — click one to use it, or write your own below:</p>
-              <div className="mt-1 flex flex-wrap gap-1.5">
-                {clusterKeywords.map((k) => (
-                  <button key={k.id} type="button"
-                    onClick={() => { setPrimaryKeyword(k.keyword); setOutline([]); }}
-                    className={`rounded-full border px-2.5 py-1 text-xs ${
-                      primaryKeyword === k.keyword
-                        ? "border-atlasteal bg-atlasteal/10 text-atlasteal font-semibold"
-                        : "border-atlasnavy/20 text-atlasnavy/70 hover:bg-atlasnavy/5"
-                    }`}>
-                    {k.keyword}{k.is_used && <span className="ml-1 text-atlasnavy/40">(used)</span>}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Primary keyword */}
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="block text-sm font-medium text-atlasnavy">Primary keyword / topic</label>
-            <button type="button" onClick={suggestTopic} disabled={suggestingTopic || !clusterId}
-              className="ml-3 shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50">
-              {suggestingTopic ? "Thinking…" : "Suggest a topic"}
-            </button>
-          </div>
-          <input value={primaryKeyword}
-            onChange={(e) => { setPrimaryKeyword(e.target.value); setTopicRationale(null); setOutline([]); setDfsOpen(false); setDfsKeywords([]); }}
-            placeholder="e.g. best invoicing software for freelancers 2026"
-            className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm" />
-          {topicRationale && <p className="mt-1 text-xs text-atlasteal">{topicRationale}</p>}
-          {topicError && <p className="mt-1 text-xs text-red-600">{topicError}</p>}
-          <p className="mt-1 text-xs text-atlasnavy/40">
-            Each suggestion is saved to the bank. Click again for a fresh angle — previously suggested topics stay in the bank for later.
-          </p>
-        </div>
-
-        {/* Step 1: Draft outline */}
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="block text-sm font-medium text-atlasnavy">Step 1 — Outline &amp; keywords (runs automatically)</label>
-            <button type="button" onClick={handleDraftAndResearch}
-              disabled={fetchingOutline || fetchingDFS || !primaryKeyword}
-              className="shrink-0 rounded-md border border-atlasteal px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50">
-              {fetchingOutline ? "Drafting outline…" : fetchingDFS ? "Researching keywords…"
-                : outline.length > 0 ? "Re-run outline + keywords" : "Run now"}
-            </button>
-          </div>
-          {!outline.length && !fetchingOutline && !fetchingDFS && (
-            <p className="mt-1 text-xs text-atlasnavy/40">
-              Starts on its own a moment after you set the primary keyword.
-            </p>
-          )}
-          {outlineError && <p className="mt-1 text-xs text-red-600">{outlineError}</p>}
-          {outline.length > 0 && (
-            <div className="mt-2 rounded-md border border-atlasnavy/10 bg-atlasnavy/[0.02] px-3 py-2">
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-atlasnavy/40">Article sections</p>
-              <ol className="space-y-0.5">
-                {outline.map((h, i) => <li key={i} className="text-xs text-atlasnavy/70">{i + 1}. {h}</li>)}
-              </ol>
-            </div>
-          )}
-        </div>
-
-        {/* Step 2: Supporting keywords */}
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="block text-sm font-medium text-atlasnavy">Supporting keywords (auto-assigned, comma separated)</label>
-            <div className="flex items-center gap-1.5">
-              <button type="button" onClick={suggestSupportingKeywords}
-                disabled={!primaryKeyword || unusedClusterKeywords.length === 0}
-                className="shrink-0 rounded-md border border-atlasnavy/20 px-2.5 py-1 text-xs font-semibold text-atlasnavy/70 hover:bg-atlasnavy/5 disabled:opacity-50">
-                Add relevant from bank
-              </button>
-              <button type="button"
-                onClick={() => fetchDFSKeywords(fetchedSources.map((s) => s.title).filter(Boolean), outline)}
-                disabled={!primaryKeyword || fetchingDFS}
-                className="shrink-0 rounded-md border border-atlasteal/60 px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50">
-                {fetchingDFS ? "Researching…" : "Refresh keywords"}
-              </button>
-            </div>
-          </div>
-          <input value={supporting} onChange={(e) => setSupporting(e.target.value)}
-            className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm" />
-          {suggestionMessage && <p className="mt-1 text-xs text-atlasnavy/50">{suggestionMessage}</p>}
-          {dfsError && <p className="mt-1 text-xs text-red-600">{dfsError}</p>}
-          {dfsOpen && fetchingDFS && (
-            <p className="mt-1 text-xs text-atlasnavy/50">
-              {outline.length > 0 ? "Finding keywords based on your outline…"
-                : fetchedSources.length > 0 ? "Finding keywords based on your sources…"
-                : "Identifying subtopics and fetching keyword data…"}
-            </p>
-          )}
-
-          {/* Tiered keyword picker */}
-          {dfsOpen && dfsKeywords.length > 0 && (
-            <div className="mt-2 space-y-2">
-              <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold text-atlasnavy">
-                  {dfsKeywords.length} keywords found — click to select:
-                </p>
-                <button type="button" onClick={() => setDfsOpen(false)}
-                  className="text-xs text-atlasnavy/40 hover:text-atlasnavy">✕</button>
-              </div>
-
-              <TierSection tier="recommended" keywords={byTier.recommended} selected={dfsSelected} onToggle={toggleDfsKeyword} defaultOpen={true} />
-              <TierSection tier="related" keywords={byTier.related} selected={dfsSelected} onToggle={toggleDfsKeyword} defaultOpen={true} />
-              <TierSection tier="check" keywords={byTier.check} selected={dfsSelected} onToggle={toggleDfsKeyword} defaultOpen={false} />
-
-              <div className="flex items-center gap-2 pt-1">
-                <button type="button" onClick={addSelectedDfsKeywords} disabled={dfsSelected.size === 0}
-                  className="rounded-md bg-atlasteal px-3 py-1 text-xs font-semibold text-white disabled:opacity-40">
-                  Add {dfsSelected.size > 0 ? `${dfsSelected.size} selected` : "selected"}
+    <div className="mx-auto max-w-3xl">
+      <div className="rounded-2xl border border-atlasnavy/5 bg-white p-8 shadow-sm">
+        {/* ── Step 1: topic ─────────────────────────────────────────────── */}
+        <Step n={1} title="Pick your topic" state={step1}>
+          <div className="space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <select value={clusterId} onChange={(e) => setClusterId(e.target.value)}
+                className={`${inputCls} sm:max-w-[220px]`}>
+                {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <div className="flex flex-1 gap-2">
+                <input value={primaryKeyword}
+                  onChange={(e) => { setPrimaryKeyword(e.target.value); setTopicRationale(null); setOutline([]); setDfsOpen(false); setDfsKeywords([]); }}
+                  placeholder="Primary keyword, e.g. best invoicing software for freelancers 2026"
+                  className={inputCls} />
+                <button type="button" onClick={suggestTopic} disabled={suggestingTopic || !clusterId} className={tealBtn}>
+                  {suggestingTopic ? "Thinking…" : "Suggest"}
                 </button>
-                <button type="button"
-                  onClick={() => setDfsSelected(new Set(dfsKeywords.map((k) => k.keyword)))}
-                  className="text-xs text-atlasteal hover:underline">Select all</button>
-                <button type="button" onClick={() => setDfsSelected(new Set())}
-                  className="text-xs text-atlasnavy/50 hover:underline">Clear</button>
               </div>
             </div>
-          )}
-          {dfsOpen && !fetchingDFS && dfsKeywords.length === 0 && !dfsError && (
-            <p className="mt-1 text-xs text-atlasnavy/50">No keywords found for this topic — try rephrasing it.</p>
-          )}
-        </div>
+            {topicRationale && <p className="text-xs text-atlasteal">{topicRationale}</p>}
+            {topicError && <p className="text-xs text-red-600">{topicError}</p>}
+            {clusterKeywords.length > 0 && (
+              <div className="rounded-xl bg-atlascloud p-3">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-atlasnavy/40">
+                  Keyword bank — tap one to use it as the topic
+                </p>
+                <div className="mt-2 flex max-h-36 flex-wrap gap-1.5 overflow-y-auto pr-1">
+                  {clusterKeywords.map((k) => (
+                    <button key={k.id} type="button"
+                      onClick={() => { setPrimaryKeyword(k.keyword); setOutline([]); }}
+                      className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                        primaryKeyword === k.keyword
+                          ? "border-atlasteal bg-atlasteal font-semibold text-white"
+                          : "border-atlasnavy/15 bg-white text-atlasnavy/70 hover:border-atlasteal/50 hover:text-atlasnavy"
+                      }`}>
+                      {k.keyword}{k.is_used && <span className={`ml-1 ${primaryKeyword === k.keyword ? "text-white/60" : "text-atlasnavy/35"}`}>· used</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </Step>
 
-        {/* Step 3: Sources */}
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="block text-sm font-medium text-atlasnavy">
-              Recent, credible sources — one per line: <code>url | title | YYYY-MM-DD</code>
-            </label>
-            <button type="button" onClick={handleFetchSources} disabled={fetchingSources || !primaryKeyword}
-              className="ml-3 shrink-0 rounded-md border border-atlasteal px-2.5 py-1 text-xs font-semibold text-atlasteal hover:bg-atlasteal/10 disabled:opacity-50">
-              {fetchingSources ? "Researching…" : "Fetch sources"}
+        {/* ── Step 2: outline + supporting keywords (auto) ──────────────── */}
+        <Step n={2} title="Outline & supporting keywords" hint="runs automatically" state={step2}>
+          <div className="space-y-3">
+            {researching && (
+              <p className="flex items-center gap-2 text-xs text-atlasteal">
+                {fetchingOutline ? "Drafting the article outline…"
+                  : outline.length > 0 ? "Finding keywords based on the outline…"
+                  : fetchedSources.length > 0 ? "Finding keywords based on your sources…"
+                  : "Identifying subtopics and fetching keyword data…"}
+              </p>
+            )}
+            {!researching && step2 !== "done" && (
+              <p className="text-xs text-atlasnavy/40">Starts on its own a moment after you set the topic.</p>
+            )}
+            {outlineError && <p className="text-xs text-red-600">{outlineError}</p>}
+            {dfsError && <p className="text-xs text-red-600">{dfsError}</p>}
+
+            {outline.length > 0 && (
+              <div className="rounded-xl bg-atlassky/30 p-3">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-atlasnavy/40">Article sections</p>
+                <ol className="mt-1.5 space-y-0.5">
+                  {outline.map((h, i) => <li key={i} className="text-xs text-atlasnavy/75">{i + 1}. {h}</li>)}
+                </ol>
+              </div>
+            )}
+
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-atlasnavy/60">Supporting keywords — auto-assigned, edit freely</label>
+                <div className="flex items-center gap-1.5">
+                  <button type="button" onClick={suggestSupportingKeywords}
+                    disabled={!primaryKeyword || unusedClusterKeywords.length === 0} className={ghostBtn}>
+                    From bank
+                  </button>
+                  <button type="button"
+                    onClick={() => fetchDFSKeywords(fetchedSources.map((s) => s.title).filter(Boolean), outline)}
+                    disabled={!primaryKeyword || fetchingDFS} className={tealBtn}>
+                    {fetchingDFS ? "Researching…" : "Re-research"}
+                  </button>
+                </div>
+              </div>
+              <input value={supporting} onChange={(e) => setSupporting(e.target.value)} className={`mt-1.5 ${inputCls}`} />
+              {suggestionMessage && <p className="mt-1 text-xs text-atlasteal">{suggestionMessage}</p>}
+            </div>
+
+            {dfsOpen && dfsKeywords.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-atlasnavy">{dfsKeywords.length} keywords found — tap to add more:</p>
+                  <button type="button" onClick={() => setDfsOpen(false)}
+                    className="text-xs text-atlasnavy/40 hover:text-atlasnavy">✕</button>
+                </div>
+                <TierSection tier="recommended" keywords={byTier.recommended} selected={dfsSelected} onToggle={toggleDfsKeyword} defaultOpen={true} />
+                <TierSection tier="related" keywords={byTier.related} selected={dfsSelected} onToggle={toggleDfsKeyword} defaultOpen={true} />
+                <TierSection tier="check" keywords={byTier.check} selected={dfsSelected} onToggle={toggleDfsKeyword} defaultOpen={false} />
+                <div className="flex items-center gap-3 pt-1">
+                  <button type="button" onClick={addSelectedDfsKeywords} disabled={dfsSelected.size === 0}
+                    className="rounded-full bg-atlasteal px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-atlasnavy disabled:opacity-40">
+                    Add {dfsSelected.size > 0 ? `${dfsSelected.size} selected` : "selected"}
+                  </button>
+                  <button type="button"
+                    onClick={() => setDfsSelected(new Set(dfsKeywords.map((k) => k.keyword)))}
+                    className="text-xs font-semibold text-atlasteal hover:underline">Select all</button>
+                  <button type="button" onClick={() => setDfsSelected(new Set())}
+                    className="text-xs text-atlasnavy/50 hover:underline">Clear</button>
+                </div>
+              </div>
+            )}
+            {dfsOpen && !fetchingDFS && dfsKeywords.length === 0 && !dfsError && (
+              <p className="text-xs text-atlasnavy/50">No keywords found for this topic — try rephrasing it.</p>
+            )}
+          </div>
+        </Step>
+
+        {/* ── Step 3: sources + notes ───────────────────────────────────── */}
+        <Step n={3} title="Sources & notes" state={step3}>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-semibold text-atlasnavy/60">
+                Credible sources — one per line: <code className="rounded bg-atlascloud px-1">url | title | YYYY-MM-DD</code>
+              </label>
+              <button type="button" onClick={handleFetchSources} disabled={fetchingSources || !primaryKeyword} className={tealBtn}>
+                {fetchingSources ? "Researching…" : "Fetch sources"}
+              </button>
+            </div>
+            <textarea value={sourcesText} onChange={(e) => setSourcesText(e.target.value)} rows={5} className={inputCls} />
+            {sourcesError && <p className="text-xs text-red-600">{sourcesError}</p>}
+            {fetchedSources.length > 0 && (
+              <ul className="space-y-1 text-xs text-atlasnavy/60">
+                {fetchedSources.map((s, i) => (
+                  <li key={i}><span className="font-semibold text-atlasnavy">{s.domain}</span>{s.authorityNote ? ` — ${s.authorityNote}` : ""}</li>
+                ))}
+              </ul>
+            )}
+            {suggestedFaqs.length > 0 && (
+              <div className="rounded-xl bg-atlassky/30 p-3">
+                <p className="text-xs font-semibold text-atlasnavy">Reader questions found while researching — covered in the FAQ section:</p>
+                <ul className="mt-1 list-disc pl-5 text-xs text-atlasnavy/70">
+                  {suggestedFaqs.map((q, i) => <li key={i}>{q}</li>)}
+                </ul>
+              </div>
+            )}
+            <div>
+              <label className="text-xs font-semibold text-atlasnavy/60">Editor notes (optional)</label>
+              <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className={`mt-1.5 ${inputCls}`} />
+            </div>
+          </div>
+        </Step>
+
+        {/* ── Step 4: generate ──────────────────────────────────────────── */}
+        <Step n={4} title="Generate" state={step4} last>
+          <div className="space-y-3">
+            {error && <p className="text-sm text-red-600">{error}</p>}
+            {duplicateMatches && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm">
+                <p className="font-semibold text-amber-800">This topic looks similar to existing content — possible duplicate:</p>
+                <ul className="mt-1 list-disc pl-5 text-amber-800">
+                  {duplicateMatches.map((m) => <li key={m.slug}>{m.title} ({Math.round(m.score * 100)}% overlap)</li>)}
+                </ul>
+                <button onClick={() => submit(true)}
+                  className="mt-3 rounded-full bg-amber-600 px-4 py-2 text-xs font-bold text-white hover:bg-amber-700">
+                  Generate anyway (new angle)
+                </button>
+              </div>
+            )}
+            <button disabled={loading || !primaryKeyword} onClick={() => submit(false)}
+              className="w-full rounded-full bg-atlasnavy py-3 text-sm font-bold text-white transition-colors hover:bg-atlasteal disabled:opacity-40">
+              {loading ? "Generating — fact-checking as it writes…" : "Generate publish-ready post"}
             </button>
+            <p className="text-center text-xs text-atlasnavy/40">
+              Duplicate check, fact-check, originality score, affiliate & internal links — all automatic.
+            </p>
           </div>
-          <textarea value={sourcesText} onChange={(e) => setSourcesText(e.target.value)} rows={6}
-            className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm" />
-          {sourcesError && <p className="mt-1 text-xs text-red-600">{sourcesError}</p>}
-          {fetchedSources.length > 0 && (
-            <ul className="mt-2 space-y-1 text-xs text-atlasnavy/60">
-              {fetchedSources.map((s, i) => (
-                <li key={i}><span className="font-semibold text-atlasnavy">{s.domain}</span>{s.authorityNote ? ` — ${s.authorityNote}` : ""}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        {suggestedFaqs.length > 0 && (
-          <div className="rounded-md border border-atlasteal/30 bg-atlasteal/5 p-3">
-            <p className="text-xs font-semibold text-atlasnavy">Reader questions found while researching — these will be covered in the FAQ section:</p>
-            <ul className="mt-1 list-disc pl-5 text-xs text-atlasnavy/70">
-              {suggestedFaqs.map((q, i) => <li key={i}>{q}</li>)}
-            </ul>
-          </div>
-        )}
-
-        <div>
-          <label className="block text-sm font-medium text-atlasnavy">Editor notes (optional)</label>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
-            className="mt-1 w-full rounded-md border border-atlasnavy/20 px-3 py-2 text-sm" />
-        </div>
-
-        {error && <p className="text-sm text-red-600">{error}</p>}
-
-        {duplicateMatches && (
-          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm">
-            <p className="font-medium text-amber-800">This topic looks similar to existing content — possible duplicate:</p>
-            <ul className="mt-1 list-disc pl-5 text-amber-800">
-              {duplicateMatches.map((m) => <li key={m.slug}>{m.title} ({Math.round(m.score * 100)}% overlap)</li>)}
-            </ul>
-            <button onClick={() => submit(true)}
-              className="mt-2 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white">Generate anyway (new angle)</button>
-          </div>
-        )}
-
-        <button disabled={loading || !primaryKeyword} onClick={() => submit(false)}
-          className="rounded-md bg-atlasteal px-4 py-2 text-sm font-semibold text-white hover:bg-atlasteal/90 disabled:opacity-50">
-          {loading ? "Generating…" : "Generate publish-ready post"}
-        </button>
+        </Step>
       </div>
     </div>
   );
