@@ -81,8 +81,32 @@ FAQS:
 ${faqBlock}`;
 }
 
-// Calls OpenRouter to produce the final <div class="doc"> body HTML.
+// Calls OpenRouter to produce the final <div class="doc"> body HTML. Retries when the
+// model's output looks truncated: a live push (Notion Templates post, 2026-07-14) came
+// back as a 990-char stub for a 15k-char article and was silently published to WP in that
+// state — the formatted HTML of a complete article is always LONGER than its markdown
+// (tags added, nothing removed) and always ends with the FAQ accordion, so both make a
+// cheap, reliable completeness check.
+const FORMAT_MAX_ATTEMPTS = 3;
+
+function looksCompleteDocHtml(html: string, article: ArticleForWordPress): boolean {
+  return html.length > article.content_md.length && html.includes("faqs-accordion");
+}
+
 export async function formatArticleToDocHtml(article: ArticleForWordPress): Promise<string> {
+  let lastLength = 0;
+  for (let attempt = 1; attempt <= FORMAT_MAX_ATTEMPTS; attempt++) {
+    const html = await formatArticleToDocHtmlOnce(article);
+    if (looksCompleteDocHtml(html, article)) return html;
+    lastLength = html.length;
+  }
+  throw new Error(
+    `Formatting kept coming back truncated (${lastLength} chars of HTML for ${article.content_md.length} chars ` +
+      `of markdown after ${FORMAT_MAX_ATTEMPTS} attempts) — not pushing an incomplete post to WordPress. Try again.`
+  );
+}
+
+async function formatArticleToDocHtmlOnce(article: ArticleForWordPress): Promise<string> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set — cannot format the article for WordPress.");
 
