@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import {
   generateArticle,
+  regenerateDraftBody,
   redactFiguresFlaggedByFactCheck,
   redactDescriptiveClaimsFlaggedByFactCheck,
+  type GeneratedArticle,
 } from "@/lib/generate";
-import { factCheckArticle } from "@/lib/factcheck";
-import { checkOriginality } from "@/lib/originality";
+import { fetchSourcesText } from "@/lib/fetchSourceText";
+import { factCheckViaOpenRouter, checkOriginalityViaOpenRouter } from "@/lib/redoScoring";
+import { FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
+import { ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
+import { stripDashes } from "@/lib/textClean";
 import {
   slugify,
   findDuplicates,
@@ -17,13 +22,64 @@ import {
   applyInternalLinks,
 } from "@/lib/seo";
 
-// generateArticle() now runs an internal self-correction gate (fact-check, optional
-// one-shot revision, optional re-check) before returning, on top of this route's own
-// fact-check + originality calls. That's up to ~6 sequential LLM round-trips per
-// request, so the platform default timeout no longer has enough margin.
+// The route now runs: server-side source pre-fetch -> generation (writer grounded in the
+// real page text) -> grounded OpenRouter scoring -> save draft -> bounded auto-redo loop
+// (the same surgical fix machinery as the Redo button) -> update. Several sequential LLM
+// round-trips, so keep the maximum duration.
 export const maxDuration = 300;
 
+// A generation_logs row younger than this with no article_id yet counts as an IN-FLIGHT
+// generation for the duplicate guard, so two parallel requests for near-identical topics
+// can't both slip past a guard that only looks at saved articles. Older rows are treated
+// as dead (crashed/timed-out runs) and ignored.
+const IN_FLIGHT_WINDOW_MS = 15 * 60 * 1000;
+
+// Auto-redo loop bounds. The loop only STARTS a new round while total elapsed route time is
+// under this ceiling; the draft is already saved before the loop begins, so even a
+// worst-case overrun that hits the platform's 300s kill only loses the improvement round,
+// never the article.
+const AUTO_REDO_DEADLINE_MS = 175_000;
+const AUTO_REDO_MAX_ATTEMPTS = 2;
+const AUTO_REDO_REWRITE_TIMEOUT_MS = 70_000;
+
+const isOrigOk = (o: { originality_score: number; needs_review: boolean }) =>
+  !o.needs_review && o.originality_score >= ORIGINALITY_PASS_THRESHOLD;
+const isFactOk = (f: { accuracy_score: number; needs_review: boolean }) =>
+  !f.needs_review && f.accuracy_score >= FACT_CHECK_PASS_THRESHOLD;
+
+// Grounded scoring, identical to the Redo path (OpenRouter/claude-sonnet-4.5 against the
+// real fetched page text) — the setup proven to evaluate these figure-heavy drafts
+// correctly, unlike the noisier generation-time Anthropic checkers this route used before.
+async function scoreCandidate(
+  contentMd: string,
+  faqs: { question: string; answer: string }[],
+  fetched: Record<string, string>
+) {
+  const [orig, fact] = await Promise.all([
+    checkOriginalityViaOpenRouter(contentMd),
+    factCheckViaOpenRouter(contentMd, faqs, fetched),
+  ]);
+  const passes = isOrigOk(orig) && isFactOk(fact);
+  const rank = (passes ? 1000 : 0) + orig.originality_score + fact.accuracy_score;
+  return { contentMd, faqs, orig, fact, passes, rank };
+}
+
+// Applies the deterministic figure/descriptive redaction backstops to whatever is about to
+// be persisted, keyed off that candidate's own fact-check issues (same as before, just
+// factored out because the route now persists up to twice: baseline draft, then the
+// auto-redo improvement).
+function applyRedactionBackstops(
+  article: GeneratedArticle,
+  issues: { claim: string; concern: string; severity: "low" | "medium" | "high" }[],
+  fetchedSources: Record<string, string>,
+  topicHint: string
+): GeneratedArticle {
+  const figureRedacted = redactFiguresFlaggedByFactCheck(article, issues, fetchedSources, topicHint);
+  return redactDescriptiveClaimsFlaggedByFactCheck(figureRedacted, issues);
+}
+
 export async function POST(request: Request) {
+  const routeStartedAt = Date.now();
   const supabase = createClient();
 
   const body = await request.json();
@@ -54,10 +110,23 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unknown cluster" }, { status: 404 });
   }
 
-  // --- Duplicate-content guard -------------------------------------------------
-  const { data: existing } = await supabase.from("existing_content").select("slug, title");
-  const { data: priorArticles } = await supabase.from("articles").select("slug, title");
-  const allExisting = [...(existing ?? []), ...(priorArticles ?? [])];
+  // --- Duplicate-content guard (saved articles + IN-FLIGHT parallel generations) --------
+  const inFlightCutoff = new Date(Date.now() - IN_FLIGHT_WINDOW_MS).toISOString();
+  const [{ data: existing }, { data: priorArticles }, { data: inFlightLogs }] = await Promise.all([
+    supabase.from("existing_content").select("slug, title"),
+    supabase.from("articles").select("slug, title"),
+    supabase
+      .from("generation_logs")
+      .select("input_topic")
+      .is("article_id", null)
+      .eq("duplicate_warning", false)
+      .gte("created_at", inFlightCutoff),
+  ]);
+  const allExisting = [
+    ...(existing ?? []),
+    ...(priorArticles ?? []),
+    ...(inFlightLogs ?? []).map((l) => ({ slug: "(generating right now)", title: l.input_topic ?? "" })),
+  ];
   const duplicateMatches = findDuplicates(primaryKeyword, allExisting);
 
   if (duplicateMatches.length > 0 && !force) {
@@ -73,7 +142,20 @@ export async function POST(request: Request) {
     );
   }
 
-  // --- Generate ------------------------------------------------------------
+  // Register this run as in-flight BEFORE the long generation starts, so a parallel request
+  // for a near-identical topic hits the guard above instead of generating a duplicate.
+  const { data: inFlightLog } = await supabase
+    .from("generation_logs")
+    .insert({
+      input_topic: primaryKeyword,
+      cluster_id: clusterId,
+      duplicate_warning: false,
+      duplicate_matches: [],
+    })
+    .select("id")
+    .single();
+
+  // --- Supporting keywords: pick, then CLAIM up front ----------------------------------
   const { data: clusterKeywords } = await supabase
     .from("keywords")
     .select("*")
@@ -85,190 +167,247 @@ export async function POST(request: Request) {
     ? supportingKeywords
     : pickSupportingKeywords(primaryKeyword, clusterKeywords ?? []);
 
-  // fetchedSources carries the actual page text Claude fetched via web_fetch while
-  // writing the draft (see src/lib/generate.ts). It's threaded into factCheckArticle
-  // below as ground truth, so the fact-check gate can reject a cited number that the
-  // writer didn't actually verify, instead of just judging plausibility from its own
-  // training knowledge — a prompt-only fix on the writer side alone wasn't enough.
-  // generateArticle also now runs this same fact-check internally (the self-correction
-  // gate) and attempts one bounded fix before returning, so by the time we get here the
-  // draft has already had a chance to be auto-corrected, not just flagged.
-  const { article: generated, fetchedSources } = await generateArticle({
-    clusterName: cluster.name,
-    primaryKeyword,
-    supportingKeywords: effectiveSupporting,
-    sources,
-    notes,
-    suggestedFaqs,
-  });
+  // Claim the chosen keywords immediately (is_used = true) so parallel generations on the
+  // same cluster auto-pick disjoint sets instead of racing for the same ones. Claimed
+  // keywords the model ends up not using — and every claim, if generation fails — are
+  // reverted in the cleanup paths below.
+  const claimedIds = (clusterKeywords ?? [])
+    .filter((k) => !k.is_used && effectiveSupporting.some((s) => s.toLowerCase() === k.keyword.toLowerCase()))
+    .map((k) => k.id as string);
+  if (claimedIds.length > 0) {
+    await supabase.from("keywords").update({ is_used: true }).in("id", claimedIds);
+  }
 
-  // --- Auto-apply affiliate links wherever a tracked tool is mentioned ----------
-  const { data: affiliateLinks } = await supabase
-    .from("affiliate_links")
-    .select("id, label, url, trigger_keywords")
-    .eq("is_active", true);
+  const releaseClaims = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    await supabase.from("keywords").update({ is_used: false }).in("id", ids).then(() => {}, () => {});
+  };
+  const abandonInFlight = async () => {
+    if (!inFlightLog?.id) return;
+    await supabase.from("generation_logs").delete().eq("id", inFlightLog.id).then(() => {}, () => {});
+  };
 
-  const { content: contentWithAffiliateLinks, used: affiliateLinksUsed } = applyAffiliateLinks(
-    generated.content_md,
-    affiliateLinks ?? []
-  );
-  generated.content_md = contentWithAffiliateLinks;
+  try {
+    // --- Pre-fetch the sources server-side (real ground truth for the writer) ----------
+    // Anthropic's web_fetch fails on JS-rendered vendor/pricing pages; this plain
+    // browser-UA fetch gets the real text (see src/lib/fetchSourceText.ts). Feeding it into
+    // the writer's prompt is what lets the first draft get figures right instead of
+    // fabricating (then getting redacted, then needing a manual Redo).
+    const preFetchedSources = await fetchSourcesText(sources);
 
-  const slug = slugify(generated.title);
-
-  const keywordRecords = (clusterKeywords ?? []).filter((k) =>
-    generated.keywords_used.some((u) => u.toLowerCase() === k.keyword.toLowerCase())
-  );
-
-  // Fall back gracefully if an older model response didn't include keyword_usage —
-  // treat every keyword as used verbatim (original === used_as) rather than dropping it.
-  const usage =
-    generated.keyword_usage?.length
-      ? generated.keyword_usage
-      : generated.keywords_used.map((kw) => ({ original: kw, used_as: kw }));
-
-  // --- Auto internal linking -----------------------------------------------------
-  // If the primary or any supporting keyword is already covered by another live blog
-  // (a published generated article, or a scraped existing post), link that keyword's
-  // first mention to it. Runs after affiliate links; applyInternalLinks skips text
-  // that's already inside a link, so the two never collide.
-  const [{ data: liveArticles }, { data: existingPosts }] = await Promise.all([
-    supabase
-      .from("articles")
-      .select("slug, title, keyword_table")
-      .or("status.eq.published,wp_status.eq.published"),
-    supabase.from("existing_content").select("slug, title, source_url"),
-  ]);
-
-  const articleTerms = [primaryKeyword, ...effectiveSupporting].map((kw) => ({
-    keyword: kw,
-    surface:
-      usage.find((u) => u.original.toLowerCase() === kw.toLowerCase())?.used_as || kw,
-  }));
-
-  const linkCandidates = buildInternalLinkCandidates(
-    articleTerms,
-    liveArticles ?? [],
-    existingPosts ?? [],
-    slug
-  );
-  const { content: contentWithInternalLinks, used: internalLinksUsed } = applyInternalLinks(
-    generated.content_md,
-    linkCandidates
-  );
-  generated.content_md = contentWithInternalLinks;
-
-  const keywordTable = buildKeywordTable(
-    generated.content_md,
-    usage,
-    (clusterKeywords ?? []).map((k) => ({
-      keyword: k.keyword,
-      cluster: cluster.name,
-      search_intent: k.search_intent,
-      research_source: k.research_source ?? (sources[0]?.title ?? "Editorial research"),
-    }))
-  );
-
-  // --- Fact-check + originality check, run in parallel --------------------------
-  // Both are non-blocking at save time (the draft is always saved either way), but
-  // each result gates something downstream: fact_check surfaces an accuracy score and
-  // a list of claims for editor review, and originality_check's score gates the
-  // *publish* transition (see updateArticleStatus in src/app/dashboard/actions.ts).
-  // factCheckArticle is passed fetchedSources (the real page text fetched during
-  // generation) so it can verify cited numbers against what was actually fetched, not
-  // just judge plausibility — see src/lib/factcheck.ts. This re-check runs again
-  // post-affiliate-link insertion and is the authoritative, stored result (independent
-  // of, and run after, generateArticle's own internal self-correction pass).
-  // checkOriginality has no dependency on factCheck's result, so the two run via
-  // Promise.all rather than sequential awaits — that was costing a full extra LLM
-  // round-trip on every request's critical path for no reason.
-  const [factCheck, originalityCheck] = await Promise.all([
-    factCheckArticle(generated.content_md, generated.faqs, sources, fetchedSources),
-    checkOriginality(generated.content_md, sources),
-  ]);
-
-  // --- Round 9: re-apply the fact-check-issues redaction backstop against the
-  // AUTHORITATIVE fact-check result, not just generateArticle's internal one. -------------
-  // generateArticle() already runs redactFiguresFlaggedByFactCheck once, internally, against
-  // its own self-correction loop's bestCheck. But bestCheck is one specific LLM fact-check call
-  // made *during* generation; factCheck above is a separate, later LLM fact-check call against
-  // the same final text, and the two don't always agree — live retesting found a real case
-  // (Trello "10 collaborators" / "10 boards" / "250 workspace command runs per month") that
-  // this authoritative check flagged HIGH but the internal pass either missed or didn't act on
-  // in time, so it reached the stored article completely unredacted, with needs_review left
-  // true for an editor to catch by hand instead of being fixed automatically like every other
-  // HIGH severity figure fabrication this round-8 backstop was built to handle.
-  //
-  // Re-running the same deterministic, idempotent redaction here — keyed off factCheck.issues,
-  // the actual issues list that gets persisted and shown to the editor — closes that gap
-  // regardless of why the internal pass missed it. Figures already redacted by the internal
-  // pass simply won't match again (toRedact won't find that literal substring), so this is a
-  // strict improvement, never a regression: anything the internal pass already caught is a
-  // no-op here, and anything only the authoritative check catches now gets fixed too, instead
-  // of only ever being flagged.
-  // Round 12: pass cluster.name + primaryKeyword through too — see the Round 12 comment in
-  // generate.ts above buildCompanyKeys/extractCompanyKeysFromTopic for why source-hostname-only
-  // company detection isn't reliable when the AI fetches third-party aggregator pages instead of
-  // a vendor's own pricing page.
-  // Round 13: also apply the descriptive (non-numeric) claim backstop against the
-  // authoritative factCheck.issues, for the same reason Round 9 re-applies the figure
-  // backstop here — see the Round 13 comment in generate.ts above
-  // redactDescriptiveClaimsFlaggedByFactCheck for what this catches that the figure-only
-  // backstops above it cannot (e.g. "unlimited Power-Ups" with no number attached).
-  const figureRedacted = redactFiguresFlaggedByFactCheck(
-    generated,
-    factCheck.issues,
-    fetchedSources,
-    `${cluster.name} ${primaryKeyword}`
-  );
-  const finalRedacted = redactDescriptiveClaimsFlaggedByFactCheck(figureRedacted, factCheck.issues);
-  generated.title = finalRedacted.title;
-  generated.meta_title = finalRedacted.meta_title;
-  generated.meta_description = finalRedacted.meta_description;
-  generated.h1 = finalRedacted.h1;
-  generated.content_md = finalRedacted.content_md;
-  generated.faqs = finalRedacted.faqs;
-
-  const { data: article, error } = await supabase
-    .from("articles")
-    .insert({
-      cluster_id: clusterId,
-      title: generated.title,
-      slug,
-      meta_title: generated.meta_title,
-      meta_description: generated.meta_description,
-      h1: generated.h1,
-      content_md: generated.content_md,
-      faqs: generated.faqs,
-      keyword_table: keywordTable,
+    // --- Generate -----------------------------------------------------------------------
+    const { article: generated, fetchedSources } = await generateArticle({
+      clusterName: cluster.name,
+      primaryKeyword,
+      supportingKeywords: effectiveSupporting,
       sources,
-      affiliate_links_used: affiliateLinksUsed,
-      internal_links_used: internalLinksUsed,
-      fact_check: factCheck,
-      originality_check: originalityCheck,
-      status: "draft",
-    })
-    .select()
-    .single();
+      notes,
+      suggestedFaqs,
+      preFetchedSources,
+    });
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    // --- Auto-apply affiliate links wherever a tracked tool is mentioned ----------------
+    const { data: affiliateLinks } = await supabase
+      .from("affiliate_links")
+      .select("id, label, url, trigger_keywords")
+      .eq("is_active", true);
+
+    const { content: contentWithAffiliateLinks, used: affiliateLinksUsed } = applyAffiliateLinks(
+      generated.content_md,
+      affiliateLinks ?? []
+    );
+    generated.content_md = contentWithAffiliateLinks;
+
+    const slug = slugify(generated.title);
+
+    const keywordRecords = (clusterKeywords ?? []).filter((k) =>
+      generated.keywords_used.some((u) => u.toLowerCase() === k.keyword.toLowerCase())
+    );
+
+    // Fall back gracefully if an older model response didn't include keyword_usage —
+    // treat every keyword as used verbatim (original === used_as) rather than dropping it.
+    const usage =
+      generated.keyword_usage?.length
+        ? generated.keyword_usage
+        : generated.keywords_used.map((kw) => ({ original: kw, used_as: kw }));
+
+    // --- Auto internal linking -----------------------------------------------------------
+    // If the primary or any supporting keyword is already covered by another live blog
+    // (a published generated article, or a scraped existing post), link that keyword's
+    // first mention to it. Runs after affiliate links; applyInternalLinks skips text
+    // that's already inside a link, so the two never collide.
+    const [{ data: liveArticles }, { data: existingPosts }] = await Promise.all([
+      supabase
+        .from("articles")
+        .select("slug, title, keyword_table")
+        .or("status.eq.published,wp_status.eq.published"),
+      supabase.from("existing_content").select("slug, title, source_url"),
+    ]);
+
+    const articleTerms = [primaryKeyword, ...effectiveSupporting].map((kw) => ({
+      keyword: kw,
+      surface:
+        usage.find((u) => u.original.toLowerCase() === kw.toLowerCase())?.used_as || kw,
+    }));
+
+    const linkCandidates = buildInternalLinkCandidates(
+      articleTerms,
+      liveArticles ?? [],
+      existingPosts ?? [],
+      slug
+    );
+    const { content: contentWithInternalLinks, used: internalLinksUsed } = applyInternalLinks(
+      generated.content_md,
+      linkCandidates
+    );
+    generated.content_md = contentWithInternalLinks;
+
+    const keywordTable = buildKeywordTable(
+      generated.content_md,
+      usage,
+      (clusterKeywords ?? []).map((k) => ({
+        keyword: k.keyword,
+        cluster: cluster.name,
+        search_intent: k.search_intent,
+        research_source: k.research_source ?? (sources[0]?.title ?? "Editorial research"),
+      }))
+    );
+
+    const topicHint = `${cluster.name} ${primaryKeyword}`;
+
+    // --- Grounded baseline score (same scorers + ground truth as the Redo button) -------
+    let best = await scoreCandidate(generated.content_md, generated.faqs, fetchedSources);
+
+    // --- Persist the draft NOW, before the auto-redo loop -------------------------------
+    // If a slow improvement round pushes past the platform's 300s kill, the draft (with
+    // honest grounded scores) is already saved; only the improvement is lost, and the
+    // Redo button picks up from exactly here.
+    const baselineRedacted = applyRedactionBackstops(
+      { ...generated, content_md: best.contentMd, faqs: best.faqs },
+      best.fact.issues,
+      fetchedSources,
+      topicHint
+    );
+
+    const { data: article, error } = await supabase
+      .from("articles")
+      .insert({
+        cluster_id: clusterId,
+        title: baselineRedacted.title,
+        slug,
+        meta_title: baselineRedacted.meta_title,
+        meta_description: baselineRedacted.meta_description,
+        h1: baselineRedacted.h1,
+        content_md: baselineRedacted.content_md,
+        faqs: baselineRedacted.faqs,
+        keyword_table: keywordTable,
+        sources,
+        affiliate_links_used: affiliateLinksUsed,
+        internal_links_used: internalLinksUsed,
+        fact_check: best.fact,
+        originality_check: best.orig,
+        status: "draft",
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    // Keyword bookkeeping: everything actually used stays claimed; claimed-but-unused goes
+    // back to the bank.
+    const usedIds = new Set(keywordRecords.map((k) => k.id as string));
+    if (keywordRecords.length > 0) {
+      await supabase
+        .from("keywords")
+        .update({ is_used: true })
+        .in("id", keywordRecords.map((k) => k.id));
+    }
+    await releaseClaims(claimedIds.filter((id) => !usedIds.has(id)));
+
+    // Mark the in-flight log as completed by attaching the article id (also what removes it
+    // from the in-flight duplicate guard).
+    if (inFlightLog?.id) {
+      await supabase.from("generation_logs").update({ article_id: article.id }).eq("id", inFlightLog.id);
+    } else {
+      await supabase.from("generation_logs").insert({
+        input_topic: primaryKeyword,
+        cluster_id: clusterId,
+        duplicate_warning: false,
+        duplicate_matches: [],
+        article_id: article.id,
+      });
+    }
+
+    // --- Auto-redo loop: fix what the grounded check flagged, before any human sees it --
+    // Same surgical machinery as the Redo button (regenerateDraftBody against the fetched
+    // text, re-score, keep the best candidate), run automatically while the route still has
+    // time budget. With the writer now grounded up front this usually has little to do.
+    let finalArticle = baselineRedacted;
+    try {
+      for (
+        let attempt = 0;
+        attempt < AUTO_REDO_MAX_ATTEMPTS &&
+        !best.passes &&
+        Date.now() - routeStartedAt < AUTO_REDO_DEADLINE_MS;
+        attempt++
+      ) {
+        const origIssues = isOrigOk(best.orig) ? [] : best.orig.issues ?? [];
+        const factIssues = isFactOk(best.fact) ? [] : best.fact.issues ?? [];
+        if (origIssues.length === 0 && factIssues.length === 0) break;
+
+        const redo = await regenerateDraftBody({
+          contentMd: best.contentMd,
+          faqs: best.faqs,
+          sources,
+          originalityIssues: origIssues,
+          factIssues,
+          fetchedSources,
+          timeoutMs: AUTO_REDO_REWRITE_TIMEOUT_MS,
+        });
+        if (!redo.rewritten) break;
+
+        const candidate = await scoreCandidate(stripDashes(redo.content_md), redo.faqs, fetchedSources);
+        if (candidate.rank <= best.rank) break;
+        best = candidate;
+
+        finalArticle = applyRedactionBackstops(
+          { ...baselineRedacted, content_md: best.contentMd, faqs: best.faqs },
+          best.fact.issues,
+          fetchedSources,
+          topicHint
+        );
+
+        const { error: updateError } = await supabase
+          .from("articles")
+          .update({
+            content_md: finalArticle.content_md,
+            faqs: finalArticle.faqs,
+            fact_check: best.fact,
+            originality_check: best.orig,
+          })
+          .eq("id", article.id);
+        if (updateError) break; // draft with baseline scores is already saved — fail soft
+      }
+    } catch {
+      // Best-effort improvement layer — the saved draft above is the fallback.
+    }
+
+    return NextResponse.json({
+      article: {
+        ...article,
+        content_md: finalArticle.content_md,
+        faqs: finalArticle.faqs,
+        fact_check: best.fact,
+        originality_check: best.orig,
+      },
+    });
+  } catch (err: any) {
+    // Failed generation: release the claimed keywords and drop the in-flight marker so an
+    // immediate retry of the same topic isn't blocked or starved of keywords.
+    await releaseClaims(claimedIds);
+    await abandonInFlight();
+    return NextResponse.json({ error: String(err?.message ?? err) }, { status: 500 });
   }
-
-  if (keywordRecords.length > 0) {
-    await supabase
-      .from("keywords")
-      .update({ is_used: true })
-      .in("id", keywordRecords.map((k) => k.id));
-  }
-
-  await supabase.from("generation_logs").insert({
-    input_topic: primaryKeyword,
-    cluster_id: clusterId,
-    duplicate_warning: false,
-    duplicate_matches: [],
-    article_id: article.id,
-  });
-
-  return NextResponse.json({ article });
 }

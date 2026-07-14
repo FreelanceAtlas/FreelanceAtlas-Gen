@@ -12,6 +12,14 @@ export interface GenerateInput {
   sources: { url: string; title: string; publishedDate?: string }[];
   notes?: string;
   suggestedFaqs?: string[]; // real reader questions surfaced by the "Fetch sources" research step
+  // Server-side pre-fetched page text per source URL (fetchSourcesText). When supplied, this
+  // is injected into the writer's prompt as verified ground truth — the single biggest lever
+  // on first-run quality: Anthropic's web_fetch reliably fails on JS-rendered vendor/pricing
+  // pages (see src/lib/fetchSourceText.ts), which is why first drafts used to either fabricate
+  // figures or end up full of [unconfirmed] redaction placeholders that the Redo path then
+  // fixed with exactly this same server-fetched text. Supplying it up front lets the writer
+  // get the figures right the first time.
+  preFetchedSources?: Record<string, string>;
 }
 
 export interface KeywordUsage {
@@ -1236,6 +1244,46 @@ Fix the flagged issues now and call submit_article with the complete corrected a
   return sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
 }
 
+// Merges the server-side pre-fetched source text with whatever Claude's own web_fetch calls
+// returned during generation. Per URL, the longer text wins: the server-side fetch is the
+// proven-reliable channel for JS-rendered pricing pages, but when web_fetch does succeed it
+// can return cleaner extractions, and "longer" is a cheap, deterministic proxy for "actually
+// captured the page content rather than a stub/error page".
+function mergeFetchedSources(
+  preFetched: Record<string, string>,
+  webFetched: Record<string, string>
+): Record<string, string> {
+  const merged: Record<string, string> = { ...preFetched };
+  for (const [url, text] of Object.entries(webFetched)) {
+    const existing = merged[url];
+    if (!existing || text.length > existing.length) merged[url] = text;
+  }
+  return merged;
+}
+
+// Per-source cap for the ground-truth block injected into the WRITER's prompt (distinct from
+// MAX_FETCHED_TEXT_CHARS, which caps what the fact-check pass sees). Slightly tighter since
+// several sources' text rides along with the full system prompt and the article budget.
+const PROMPT_GROUND_TRUTH_CHARS = 9000;
+
+function buildGroundTruthBlock(preFetched: Record<string, string>): string {
+  const entries = Object.entries(preFetched);
+  if (entries.length === 0) return "";
+  const body = entries
+    .map(([url, text]) => `=== FETCHED TEXT FOR ${url} ===\n${text.slice(0, PROMPT_GROUND_TRUTH_CHARS)}`)
+    .join("\n\n");
+  return `
+
+ACTUAL FETCHED SOURCE TEXT (server-fetched ground truth — this IS the real content of the pages
+listed above, fetched moments ago): every specific figure, price, plan name, feature list, or
+process detail you write about these sources must come from, and match, this text exactly. If the
+figure or detail you want is not in this text, treat it as unverified per SOURCE VERIFICATION:
+generalize it or point the reader to the provider's own page. You may still call web_fetch for
+anything not covered here (e.g. a source whose text is missing below), but you never need to
+re-fetch the pages already provided:
+${body}`;
+}
+
 export async function generateArticle(input: GenerateInput): Promise<GeneratedArticleResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -1243,6 +1291,8 @@ export async function generateArticle(input: GenerateInput): Promise<GeneratedAr
       "ANTHROPIC_API_KEY is not configured. Add it in your Vercel project's environment variables to enable generation."
     );
   }
+
+  const preFetched = input.preFetchedSources ?? {};
 
   const sourceBlock = input.sources.length
     ? input.sources
@@ -1254,29 +1304,32 @@ export async function generateArticle(input: GenerateInput): Promise<GeneratedAr
     ? input.suggestedFaqs.map((q) => `- ${q}`).join("\n")
     : "None supplied — choose the most likely People Also Ask style questions yourself.";
 
+  const groundTruthBlock = buildGroundTruthBlock(preFetched);
+
   const userPrompt = `Cluster: ${input.clusterName}
 Primary keyword: ${input.primaryKeyword}
 Supporting keywords: ${input.supportingKeywords.join(", ") || "none"}
 Editor notes: ${input.notes || "none"}
 
-Sources available below — remember, you only have each one's title/date/URL, not its content. Per
+Sources available below${groundTruthBlock ? " (their real fetched text follows further down)" : " — remember, you only have each one's title/date/URL, not its content"}. Per
 SOURCE VERIFICATION, any specific number tied to a named company, platform, tool, law, or report
-(fee, percentage, dollar amount, day count, ranking, statistic) requires a web_fetch confirming it
-first, named source or not, and the fetched text must actually contain that exact figure, not just
-be a page you successfully fetched on the right topic. If a fetch for one of these sources fails, or
-succeeds but its returned text doesn't actually contain the figure you wanted (common on JS-rendered
-pricing pages, where a static fetch can return marketing copy instead of the real price table), drop
-the specific figure or generalize it rather than filling it in from what you already know about that
-product, and do not fall back on describing that source's specific mechanism in your own generalized
-words either, point the reader to the platform's own page instead. Build your own outline
-independently of these sources either way, per the ORIGINALITY rules:
+(fee, percentage, dollar amount, day count, ranking, statistic) requires actual fetched text
+confirming it, named source or not, and that text must actually contain that exact figure, not just
+be a page on the right topic. If a source's text is unavailable, or is available but doesn't
+actually contain the figure you wanted (common on JS-rendered pricing pages, where a static fetch
+can return marketing copy instead of the real price table), drop the specific figure or generalize
+it rather than filling it in from what you already know about that product, and do not fall back on
+describing that source's specific mechanism in your own generalized words either, point the reader
+to the platform's own page instead. Build your own outline independently of these sources either
+way, per the ORIGINALITY rules:
 ${sourceBlock}
-
+${groundTruthBlock}
 Real reader questions to address in the FAQ section (cover every one of these, rephrased naturally if needed):
 ${faqBlock}
 
-Research and verify whatever specific facts you intend to cite, run the SOURCE VERIFICATION final
-self-check, then write the full FreelanceAtlas blog post by calling submit_article as your final step.`;
+Verify whatever specific facts you intend to cite against the fetched text${groundTruthBlock ? " provided above (using web_fetch only for sources not covered there)" : " via web_fetch"}, run the SOURCE
+VERIFICATION final self-check, then write the full FreelanceAtlas blog post by calling
+submit_article as your final step.`;
 
   let res: Response;
   try {
@@ -1345,7 +1398,20 @@ self-check, then write the full FreelanceAtlas blog post by calling submit_artic
   }
 
   const article = sanitizeGeneratedArticle(toolUse.input as GeneratedArticle);
-  const fetchedSources = extractFetchedSourceText(data.content);
+  // Ground truth for every downstream check/redaction = server-side pre-fetched text merged
+  // with whatever web_fetch returned during the draft (longer text wins per URL).
+  const fetchedSources = mergeFetchedSources(preFetched, extractFetchedSourceText(data.content));
+
+  // When the caller pre-fetched the sources, skip the internal Anthropic-scored
+  // self-correction loop entirely: the writer already had the real page text in its prompt
+  // (so in-draft fabrication is largely prevented at the source), and /api/generate now runs
+  // a grounded OpenRouter score + surgical redo loop (the exact machinery the Redo button
+  // uses, proven on these drafts) against the final article anyway. Running both loops would
+  // just burn up to SELF_CORRECTION_BUDGET_MS of the route's 300s for a second, noisier
+  // opinion. The deterministic regex redaction still runs below either way.
+  if (Object.keys(preFetched).length > 0) {
+    return { article: redactUnverifiedFiguresFromArticle(article, fetchedSources), fetchedSources };
+  }
 
   // --- Self-correction loop (see comment above reviseArticleForFactIssues) --------------
   // Run the ground-truth fact-check now, before returning, instead of only downstream, and
@@ -1437,6 +1503,10 @@ export async function regenerateDraftBody(input: {
   originalityIssues: RedoOriginalityIssue[];
   factIssues: RedoFactIssue[];
   fetchedSources: Record<string, string>;
+  // Optional cap on the OpenRouter call (defaults to the Redo button's generous 180s).
+  // /api/generate's in-route auto-redo passes a tighter value so a slow rewrite can't
+  // consume the remainder of the route's 300s maxDuration.
+  timeoutMs?: number;
 }): Promise<{
   content_md: string;
   faqs: { question: string; answer: string }[];
@@ -1529,7 +1599,7 @@ Return ONLY the JSON object with the full fixed content_md and faqs.`;
           { role: "user", content: userPrompt },
         ],
       }),
-      signal: AbortSignal.timeout(180000),
+      signal: AbortSignal.timeout(input.timeoutMs ?? 180000),
     });
   } catch (err: any) {
     const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
@@ -1537,7 +1607,9 @@ Return ONLY the JSON object with the full fixed content_md and faqs.`;
       content_md: input.contentMd,
       faqs: input.faqs,
       rewritten: false,
-      error: timedOut ? "Redo request timed out after 180s." : `Redo request failed: ${String(err?.message ?? err)}`,
+      error: timedOut
+        ? `Redo request timed out after ${Math.round((input.timeoutMs ?? 180000) / 1000)}s.`
+        : `Redo request failed: ${String(err?.message ?? err)}`,
     };
   }
 

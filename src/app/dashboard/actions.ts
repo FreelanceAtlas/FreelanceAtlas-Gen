@@ -5,7 +5,13 @@ import { revalidatePath } from "next/cache";
 import { checkOriginality, rewriteFlaggedPassages, ORIGINALITY_PASS_THRESHOLD } from "@/lib/originality";
 import { factCheckArticle, FACT_CHECK_PASS_THRESHOLD } from "@/lib/factcheck";
 import { stripDashes } from "@/lib/textClean";
-import { formatArticleToDocHtml, createWordPressDraft, publishWordPressPost } from "@/lib/wordpress";
+import {
+  formatArticleToDocHtml,
+  createWordPressDraft,
+  publishWordPressPost,
+  getLatestWordPressPostDate,
+  scheduleWordPressPost,
+} from "@/lib/wordpress";
 import {
   sceneForTitle,
   renderThumbnail,
@@ -97,11 +103,34 @@ export async function sendArticleToWordPress(articleId: string) {
   return { id: draft.id, editLink: draft.editLink, link: draft.link };
 }
 
-// Publishes (makes live) an article that was already pushed to WordPress as a
-// draft. Reads the stored wp_post_id, flips the WP post to "publish", and marks
-// wp_status = "published" so the Articles tab moves it to the "Live on site"
-// section. Used by the "Publish live" button in the pushed-drafts section.
-export async function publishArticleToSite(articleId: string) {
+// Publish cadence: keep the blog at roughly 2-3 posts a week. Each publish anchors on the
+// LAST post currently on the WP calendar (live or already future-scheduled) and slots this
+// one a randomized 2-3.5 days after it, so pushing a whole month's batch spreads naturally
+// into the future instead of dumping everything live in one afternoon. 56-84h averages
+// ~70h ≈ 2.4 posts/week, with enough jitter that publish times don't look robotic.
+const PUBLISH_MIN_GAP_HOURS = 56;
+const PUBLISH_MAX_GAP_HOURS = 84;
+// Slots computed at-or-before now (site quiet for a while, or first post ever) publish
+// immediately rather than scheduling a few minutes out.
+const PUBLISH_NOW_LEEWAY_MS = 10 * 60 * 1000;
+
+function nextPublishSlot(latestOnCalendar: Date | null): Date {
+  if (!latestOnCalendar) return new Date();
+  const gapHours =
+    PUBLISH_MIN_GAP_HOURS + Math.random() * (PUBLISH_MAX_GAP_HOURS - PUBLISH_MIN_GAP_HOURS);
+  return new Date(latestOnCalendar.getTime() + gapHours * 3600 * 1000);
+}
+
+// Publishes an article that was already pushed to WordPress as a draft — but instead of
+// always going live instantly, it takes the next open slot in the 2-3-posts-a-week
+// cadence: if the computed slot is already in the past (last post was 3+ days ago), the
+// post goes live now; otherwise it is scheduled with WordPress-native "future" status and
+// WP flips it live by itself at that time. Marks wp_status accordingly ("published" or
+// "scheduled" + wp_scheduled_for) so the Articles tab shows where it landed.
+export async function publishArticleToSite(articleId: string): Promise<{
+  link: string;
+  scheduledFor: string | null; // ISO UTC when scheduled into the future, null when live now
+}> {
   const supabase = createClient();
   const { data: article, error } = await supabase
     .from("articles")
@@ -112,14 +141,31 @@ export async function publishArticleToSite(articleId: string) {
   if (error || !article) throw new Error(error?.message ?? "Article not found.");
   if (!article.wp_post_id) throw new Error("This article has not been pushed to WordPress yet.");
 
-  const { link } = await publishWordPressPost(Number(article.wp_post_id));
+  const latest = await getLatestWordPressPostDate();
+  const slot = nextPublishSlot(latest);
+  const publishNow = slot.getTime() <= Date.now() + PUBLISH_NOW_LEEWAY_MS;
 
-  await supabase.from("articles").update({ wp_status: "published" }).eq("id", articleId);
+  if (publishNow) {
+    const { link } = await publishWordPressPost(Number(article.wp_post_id));
+    await supabase
+      .from("articles")
+      .update({ wp_status: "published", wp_scheduled_for: null })
+      .eq("id", articleId);
+
+    revalidatePath("/dashboard/articles");
+    revalidatePath(`/dashboard/articles/${article.slug}`);
+    return { link, scheduledFor: null };
+  }
+
+  const { link } = await scheduleWordPressPost(Number(article.wp_post_id), slot);
+  await supabase
+    .from("articles")
+    .update({ wp_status: "scheduled", wp_scheduled_for: slot.toISOString() })
+    .eq("id", articleId);
 
   revalidatePath("/dashboard/articles");
   revalidatePath(`/dashboard/articles/${article.slug}`);
-
-  return { link };
+  return { link, scheduledFor: slot.toISOString() };
 }
 
 // Generates a featured-image thumbnail for an article: LLM scene -> Gemini

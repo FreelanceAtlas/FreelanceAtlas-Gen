@@ -35,6 +35,7 @@ export interface ArticleRow {
   wpPostId: number | null;
   wpEditLink: string | null;
   wpStatus: string | null;
+  wpScheduledFor: string | null;
   thumbnailUrl: string | null;
   thumbnailStatus: string | null;
   redoStatus: string | null;
@@ -344,22 +345,30 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
   const [redoAllPending, setRedoAllPending] = useState(false);
   const [redoProgress, setRedoProgress] = useState<string | null>(null);
 
-  const { ready, pushedDraft, liveOnSite, drafts, published } = useMemo(() => {
+  const { ready, pushedDraft, scheduledOnSite, liveOnSite, drafts, published } = useMemo(() => {
     const ready: ArticleRow[] = [];
     const pushedDraft: ArticleRow[] = [];
+    const scheduledOnSite: ArticleRow[] = [];
     const liveOnSite: ArticleRow[] = [];
     const drafts: ArticleRow[] = [];
     const published: ArticleRow[] = [];
+    const now = Date.now();
     for (const a of articles) {
       // WordPress state takes priority over the internal gen status so an
       // article that's been pushed to the site is grouped by where it lives now.
-      if (a.wpPostId && a.wpStatus === "published") liveOnSite.push(a);
+      // A "scheduled" post whose slot has passed is live: WordPress flipped it
+      // itself at that time, we just haven't recorded the flip.
+      const scheduleElapsed = a.wpScheduledFor ? new Date(a.wpScheduledFor).getTime() <= now : false;
+      if (a.wpPostId && (a.wpStatus === "published" || (a.wpStatus === "scheduled" && scheduleElapsed)))
+        liveOnSite.push(a);
+      else if (a.wpPostId && a.wpStatus === "scheduled") scheduledOnSite.push(a);
       else if (a.wpPostId) pushedDraft.push(a);
       else if (a.status === "published") published.push(a);
       else if (a.ready) ready.push(a);
       else drafts.push(a);
     }
-    return { ready, pushedDraft, liveOnSite, drafts, published };
+    scheduledOnSite.sort((x, y) => (x.wpScheduledFor ?? "").localeCompare(y.wpScheduledFor ?? ""));
+    return { ready, pushedDraft, scheduledOnSite, liveOnSite, drafts, published };
   }, [articles]);
 
   const selectedCount = selected.size;
@@ -481,7 +490,7 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
 
       <SelectableSection
         title="Pushed to site as draft"
-        description="Created as a draft on freelanceatlas.com. Review it in WP, then publish it live."
+        description="Created as a draft on freelanceatlas.com. Review it in WP, then publish — it takes the next open slot in the 2-3 posts/week cadence (live now, or auto-scheduled)."
         rows={pushedDraft}
         selected={selected}
         setSelected={setSelected}
@@ -499,6 +508,34 @@ export default function ArticlesManager({ articles }: { articles: ArticleRow[] }
               </a>
             )}
             <PublishToSiteButton articleId={row.id} compact />
+          </div>
+        )}
+      />
+
+      <SelectableSection
+        title="Scheduled on site"
+        description="Queued into the 2-3 posts/week cadence. WordPress publishes each one automatically at its slot."
+        rows={scheduledOnSite}
+        selected={selected}
+        setSelected={setSelected}
+        showSchedule={false}
+        renderExtra={(row) => (
+          <div className="flex items-center gap-2">
+            {row.wpScheduledFor && (
+              <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700">
+                Goes live {formatScheduled(row.wpScheduledFor)}
+              </span>
+            )}
+            {row.wpEditLink && (
+              <a
+                href={row.wpEditLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-md bg-atlasnavy/10 px-2 py-0.5 text-[11px] font-medium text-atlasnavy hover:bg-atlasnavy/20"
+              >
+                Open in WP
+              </a>
+            )}
           </div>
         )}
       />

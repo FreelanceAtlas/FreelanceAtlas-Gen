@@ -52,6 +52,7 @@ export default async function ArticlesPage() {
       wpPostId: a.wp_post_id ?? null,
       wpEditLink: a.wp_edit_link ?? null,
       wpStatus: a.wp_status ?? null,
+      wpScheduledFor: a.wp_scheduled_for ?? null,
       thumbnailUrl: a.thumbnail_url ?? null,
       thumbnailStatus: a.thumbnail_status ?? null,
       redoStatus: a.redo_status ?? null,

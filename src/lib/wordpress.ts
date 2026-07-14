@@ -197,6 +197,61 @@ export async function createWordPressDraft(
   };
 }
 
+function wpAuthHeaders(): { base: string; headers: Record<string, string> } {
+  const base = (process.env.WORDPRESS_API_URL || SITE).replace(/\/$/, "");
+  const user = process.env.WORDPRESS_USERNAME;
+  const appPassword = process.env.WORDPRESS_APP_PASSWORD;
+  if (!user || !appPassword) {
+    throw new Error("WordPress credentials missing — set WORDPRESS_USERNAME and WORDPRESS_APP_PASSWORD.");
+  }
+  const auth = Buffer.from(`${user}:${appPassword}`).toString("base64");
+  return { base, headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" } };
+}
+
+// The most recent publish date (GMT) across the site's LIVE and FUTURE-SCHEDULED posts.
+// This is the anchor the 2-3-posts-per-week cadence spreads from: the next post slots in
+// a couple of days after whichever post currently sits last on the calendar (published or
+// already scheduled), so pushing a whole month's batch naturally queues out into the
+// future instead of dumping everything live at once. Returns null when the site has no
+// posts at all.
+export async function getLatestWordPressPostDate(): Promise<Date | null> {
+  const { base, headers } = wpAuthHeaders();
+  // status=publish,future needs an authenticated request; sorted by date desc, the top
+  // result is the furthest-out post on the calendar (future posts carry future dates).
+  const res = await fetch(
+    `${base}/wp-json/wp/v2/posts?status=publish,future&orderby=date&order=desc&per_page=1&_fields=id,date_gmt,status`,
+    { headers }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Could not read the latest WordPress post date (${res.status}): ${text.slice(0, 300)}`);
+  }
+  const posts = (await res.json()) as { date_gmt?: string }[];
+  const dateGmt = posts?.[0]?.date_gmt;
+  if (!dateGmt) return null;
+  // WP returns date_gmt without a timezone suffix — it is UTC by definition.
+  const parsed = new Date(`${dateGmt}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+// Schedules an existing WordPress post to auto-publish at the given UTC time (WP-native
+// "future" status — WordPress itself flips it live at that moment, no cron of ours needed).
+export async function scheduleWordPressPost(postId: number, publishAtUtc: Date): Promise<{ link: string }> {
+  const { base, headers } = wpAuthHeaders();
+  const dateGmt = publishAtUtc.toISOString().replace(/\.\d{3}Z$/, "");
+  const res = await fetch(`${base}/wp-json/wp/v2/posts/${postId}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ status: "future", date_gmt: dateGmt }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`WordPress scheduling failed (${res.status}): ${text.slice(0, 400)}`);
+  }
+  const data = await res.json();
+  return { link: data?.link ?? `${base}/?p=${postId}` };
+}
+
 // Flips an existing WordPress post from draft to published (makes it live).
 // Used by the "Publish live" control on articles already pushed as drafts.
 export async function publishWordPressPost(postId: number): Promise<{ link: string }> {
