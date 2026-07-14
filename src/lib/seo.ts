@@ -124,6 +124,156 @@ export function buildKeywordTable(
     .filter((row) => row.occurrences > 0);
 }
 
+// Auto-picks supporting keywords from the cluster bank when the editor didn't
+// choose any: unused keywords that share at least one significant token with the
+// primary topic, capped so the writer prompt doesn't get flooded.
+export function pickSupportingKeywords(
+  primaryKeyword: string,
+  bank: { keyword: string; is_used?: boolean | null }[],
+  max = 10
+): string[] {
+  const topicTokens = tokens(primaryKeyword);
+  if (topicTokens.size === 0) return [];
+  const primaryLower = primaryKeyword.toLowerCase();
+  const seen = new Set<string>();
+  const picked: string[] = [];
+  for (const row of bank) {
+    if (row.is_used) continue;
+    const kw = row.keyword.trim();
+    const lower = kw.toLowerCase();
+    if (!kw || lower === primaryLower || seen.has(lower)) continue;
+    let overlaps = false;
+    for (const t of tokens(kw)) if (topicTokens.has(t)) { overlaps = true; break; }
+    if (!overlaps) continue;
+    seen.add(lower);
+    picked.push(kw);
+    if (picked.length >= max) break;
+  }
+  return picked;
+}
+
+export interface InternalLinkCandidate {
+  url: string;
+  title: string;
+  slug: string;
+  terms: string[]; // this article's keyword surface forms to look for in new content
+}
+
+export interface InternalLinkApplication {
+  title: string;
+  url: string;
+  matchedTerm: string;
+}
+
+// True when every significant token of the keyword appears in the title — a strong
+// signal the post is actually about that keyword, not just sharing a word with it.
+function titleCoversKeyword(title: string, keyword: string): boolean {
+  const kwTokens = tokens(keyword);
+  if (kwTokens.size === 0) return false;
+  const titleTokens = tokens(title);
+  for (const t of kwTokens) if (!titleTokens.has(t)) return false;
+  return true;
+}
+
+// Maps each of the new article's keywords (primary + supporting, in their actual
+// written surface forms) to another live blog post that covers that keyword —
+// either a generated article whose keyword_table contains it, or a scraped
+// existing_content post whose title covers it. Generated-article matches win
+// because their keyword coverage is exact, not inferred from the title.
+export function buildInternalLinkCandidates(
+  articleTerms: { keyword: string; surface: string }[],
+  liveArticles: { slug: string; title: string; keyword_table?: { keyword?: string; usedAs?: string }[] | null }[],
+  existingContent: { slug: string; title: string; source_url?: string | null }[],
+  excludeSlug: string,
+  siteBase = "https://freelanceatlas.com"
+): InternalLinkCandidate[] {
+  const bySlug = new Map<string, InternalLinkCandidate>();
+
+  for (const { keyword, surface } of articleTerms) {
+    const kwLower = keyword.toLowerCase();
+
+    let target: { slug: string; title: string; url: string } | null = null;
+    for (const a of liveArticles) {
+      if (a.slug === excludeSlug) continue;
+      const rows = a.keyword_table ?? [];
+      const covers =
+        rows.some(
+          (r) =>
+            r.keyword?.toLowerCase() === kwLower ||
+            r.usedAs?.toLowerCase() === kwLower
+        ) || titleCoversKeyword(a.title, keyword);
+      if (covers) {
+        target = { slug: a.slug, title: a.title, url: `${siteBase}/${a.slug}/` };
+        break;
+      }
+    }
+    if (!target) {
+      for (const e of existingContent) {
+        if (e.slug === excludeSlug) continue;
+        if (titleCoversKeyword(e.title, keyword)) {
+          target = { slug: e.slug, title: e.title, url: e.source_url || `${siteBase}/${e.slug}/` };
+          break;
+        }
+      }
+    }
+    if (!target) continue;
+
+    const existing = bySlug.get(target.slug);
+    if (existing) {
+      if (!existing.terms.some((t) => t.toLowerCase() === surface.toLowerCase())) existing.terms.push(surface);
+    } else {
+      bySlug.set(target.slug, { url: target.url, title: target.title, slug: target.slug, terms: [surface] });
+    }
+  }
+
+  return Array.from(bySlug.values());
+}
+
+// Links the FIRST mention of each candidate's matched keyword to the blog post
+// that covers it. Same safety rules as applyAffiliateLinks: never nests inside an
+// existing markdown link, one link per target post, and skips heading lines so
+// H2/H3s stay clean. Capped to avoid turning the piece into a link farm.
+export function applyInternalLinks(
+  contentMd: string,
+  candidates: InternalLinkCandidate[],
+  maxLinks = 5
+): { content: string; used: InternalLinkApplication[] } {
+  let content = contentMd;
+  const used: InternalLinkApplication[] = [];
+
+  for (const candidate of candidates) {
+    if (used.length >= maxLinks) break;
+    let linked = false;
+    for (const term of candidate.terms) {
+      if (linked) break;
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b(${escaped})\\b`, "gi");
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(content)) !== null) {
+        const idx = match.index;
+
+        // Don't relink text already part of a markdown link: [text](url)
+        const before = content.slice(Math.max(0, idx - 2), idx);
+        if (before.includes("(") || before.includes("[")) continue;
+
+        // Skip heading lines
+        const lineStart = content.lastIndexOf("\n", idx) + 1;
+        if (content.slice(lineStart, lineStart + 1) === "#") continue;
+
+        content =
+          content.slice(0, idx) +
+          `[${match[0]}](${candidate.url})` +
+          content.slice(idx + match[0].length);
+        used.push({ title: candidate.title, url: candidate.url, matchedTerm: match[0] });
+        linked = true;
+        break;
+      }
+    }
+  }
+
+  return { content, used };
+}
+
 export interface AffiliateLink {
   id: string;
   label: string;

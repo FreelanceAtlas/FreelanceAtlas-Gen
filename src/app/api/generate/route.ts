@@ -7,7 +7,15 @@ import {
 } from "@/lib/generate";
 import { factCheckArticle } from "@/lib/factcheck";
 import { checkOriginality } from "@/lib/originality";
-import { slugify, findDuplicates, applyAffiliateLinks, buildKeywordTable } from "@/lib/seo";
+import {
+  slugify,
+  findDuplicates,
+  applyAffiliateLinks,
+  buildKeywordTable,
+  pickSupportingKeywords,
+  buildInternalLinkCandidates,
+  applyInternalLinks,
+} from "@/lib/seo";
 
 // generateArticle() now runs an internal self-correction gate (fact-check, optional
 // one-shot revision, optional re-check) before returning, on top of this route's own
@@ -71,6 +79,12 @@ export async function POST(request: Request) {
     .select("*")
     .eq("cluster_id", clusterId);
 
+  // If the editor didn't pick supporting keywords, auto-pick relevant unused ones
+  // from the cluster bank so generation is fully hands-off.
+  const effectiveSupporting = supportingKeywords.length
+    ? supportingKeywords
+    : pickSupportingKeywords(primaryKeyword, clusterKeywords ?? []);
+
   // fetchedSources carries the actual page text Claude fetched via web_fetch while
   // writing the draft (see src/lib/generate.ts). It's threaded into factCheckArticle
   // below as ground truth, so the fact-check gate can reject a cited number that the
@@ -82,7 +96,7 @@ export async function POST(request: Request) {
   const { article: generated, fetchedSources } = await generateArticle({
     clusterName: cluster.name,
     primaryKeyword,
-    supportingKeywords,
+    supportingKeywords: effectiveSupporting,
     sources,
     notes,
     suggestedFaqs,
@@ -112,6 +126,37 @@ export async function POST(request: Request) {
     generated.keyword_usage?.length
       ? generated.keyword_usage
       : generated.keywords_used.map((kw) => ({ original: kw, used_as: kw }));
+
+  // --- Auto internal linking -----------------------------------------------------
+  // If the primary or any supporting keyword is already covered by another live blog
+  // (a published generated article, or a scraped existing post), link that keyword's
+  // first mention to it. Runs after affiliate links; applyInternalLinks skips text
+  // that's already inside a link, so the two never collide.
+  const [{ data: liveArticles }, { data: existingPosts }] = await Promise.all([
+    supabase
+      .from("articles")
+      .select("slug, title, keyword_table")
+      .or("status.eq.published,wp_status.eq.published"),
+    supabase.from("existing_content").select("slug, title, source_url"),
+  ]);
+
+  const articleTerms = [primaryKeyword, ...effectiveSupporting].map((kw) => ({
+    keyword: kw,
+    surface:
+      usage.find((u) => u.original.toLowerCase() === kw.toLowerCase())?.used_as || kw,
+  }));
+
+  const linkCandidates = buildInternalLinkCandidates(
+    articleTerms,
+    liveArticles ?? [],
+    existingPosts ?? [],
+    slug
+  );
+  const { content: contentWithInternalLinks, used: internalLinksUsed } = applyInternalLinks(
+    generated.content_md,
+    linkCandidates
+  );
+  generated.content_md = contentWithInternalLinks;
 
   const keywordTable = buildKeywordTable(
     generated.content_md,
@@ -198,6 +243,7 @@ export async function POST(request: Request) {
       keyword_table: keywordTable,
       sources,
       affiliate_links_used: affiliateLinksUsed,
+      internal_links_used: internalLinksUsed,
       fact_check: factCheck,
       originality_check: originalityCheck,
       status: "draft",

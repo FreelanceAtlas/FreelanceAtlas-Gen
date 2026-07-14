@@ -303,6 +303,26 @@ export default async function ArticleDetail({ params }: { params: { slug: string
         </table>
       </div>
 
+      {article.internal_links_used?.length > 0 && (
+        <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-atlasnavy">Internal links applied</h2>
+          <p className="mt-1 text-xs text-atlasnavy/50">
+            Keywords already covered by another live blog were auto-linked to it (first mention only).
+          </p>
+          <ul className="mt-3 space-y-1 text-sm">
+            {article.internal_links_used.map((l: any, i: number) => (
+              <li key={i}>
+                <span className="font-semibold text-atlasnavy">{l.title}</span>
+                <span className="text-atlasnavy/50"> — matched "{l.matchedTerm}" →</span>{" "}
+                <a href={l.url} className="text-atlasteal underline" target="_blank" rel="noreferrer">
+                  {l.url}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {article.affiliate_links_used?.length > 0 && (
         <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-atlasnavy">Affiliate links applied</h2>

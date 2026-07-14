@@ -214,10 +214,34 @@ export default function GenerateForm({ clusters, keywords }: { clusters: Cluster
         .filter((r: DFSKeyword) => r.keyword && r.keyword.toLowerCase() !== primaryKeyword.toLowerCase())
         .slice(0, 30);
       setDfsKeywords(results);
+      autoPickSupporting(results);
     } catch (err) {
       console.error("Keyword research error:", err);
       setDfsError("Keyword research failed");
     } finally { setFetchingDFS(false); }
+  }
+
+  // Auto-picks supporting keywords as soon as research returns: every "recommended"
+  // keyword, topped up with "related" ones to 10 total. The field stays editable,
+  // so this is a starting point the editor can trim, not a lock-in.
+  function autoPickSupporting(results: DFSKeyword[]) {
+    setSupporting((prev) => {
+      const existing = new Set(prev.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
+      const pool = [
+        ...results.filter((k) => k.tier === "recommended"),
+        ...results.filter((k) => k.tier === "related"),
+      ];
+      const additions: string[] = [];
+      for (const k of pool) {
+        if (additions.length >= 10) break;
+        if (existing.has(k.keyword.toLowerCase())) continue;
+        existing.add(k.keyword.toLowerCase());
+        additions.push(k.keyword);
+      }
+      if (additions.length === 0) return prev;
+      setSuggestionMessage(`Auto-picked ${additions.length} supporting keyword${additions.length > 1 ? "s" : ""} — edit the list if needed.`);
+      return prev.trim() ? `${prev.trim()}, ${additions.join(", ")}` : additions.join(", ");
+    });
   }
 
   function toggleDfsKeyword(kw: string) {
