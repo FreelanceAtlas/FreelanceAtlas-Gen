@@ -152,12 +152,98 @@ export interface WordPressDraftResult {
   link: string;
 }
 
+// Minimal HTML-entity decode for category names — the WP REST `name` field comes
+// back HTML-encoded (e.g. "Business &amp; Scaling"), which we need to compare cleanly.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&#0?38;/g, "&")
+    .replace(/&#039;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
+// Picks which existing WordPress category the article belongs to. The site uses a fixed
+// editorial taxonomy (Getting Started, Money & Finance, Platforms, Skills & Tools, …);
+// we ask a cheap OpenRouter model to choose the single best-fitting *existing* category
+// by name so pushed posts land in the right section instead of "Uncategorized".
+// Fallback order: WORDPRESS_DEFAULT_CATEGORY_ID → "Getting Started" → none.
+async function resolveCategoryIds(article: ArticleForWordPress, base: string): Promise<number[]> {
+  type Cat = { id: number; name: string; slug: string };
+  let cats: Cat[] = [];
+  try {
+    const res = await fetch(
+      `${base.replace(/\/$/, "")}/wp-json/wp/v2/categories?per_page=100&_fields=id,name,slug`
+    );
+    if (res.ok) cats = (await res.json()) as Cat[];
+  } catch {
+    /* fall through to defaults */
+  }
+  // Never let the model pick the catch-all bucket.
+  cats = cats.filter((c) => c && typeof c.id === "number" && c.slug !== "uncategorized");
+
+  const fallback = (): number[] => {
+    const envId = process.env.WORDPRESS_DEFAULT_CATEGORY_ID;
+    if (envId) return [Number(envId)];
+    const gettingStarted = cats.find((c) => c.slug === "getting-started");
+    return gettingStarted ? [gettingStarted.id] : [];
+  };
+
+  if (cats.length === 0) return fallback();
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return fallback();
+
+  const model = process.env.OPENROUTER_CATEGORY_MODEL || "google/gemini-2.5-flash";
+  const list = cats.map((c) => `- ${decodeEntities(c.name)}`).join("\n");
+  const prompt =
+    `You are categorizing a freelancing blog post into ONE existing website category.\n` +
+    `Choose the single best category from this exact list and reply with the category name verbatim, nothing else:\n` +
+    `${list}\n\n` +
+    `Post title: ${article.title || article.h1}\n` +
+    (article.focus_keyword ? `Focus keyword: ${article.focus_keyword}\n` : "") +
+    (article.meta_description ? `Summary: ${article.meta_description}\n` : "") +
+    `\nCategory name:`;
+
+  const norm = (s: string) =>
+    decodeEntities(s).toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, " ").trim();
+
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": SITE,
+        "X-Title": "FreelanceAtlas-Gen",
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 30,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) return fallback();
+    const data = await res.json();
+    const target = norm(String(data?.choices?.[0]?.message?.content ?? ""));
+    if (!target) return fallback();
+    const hit =
+      cats.find((c) => norm(c.name) === target) ||
+      cats.find((c) => target.includes(norm(c.name)) || norm(c.name).includes(target));
+    return hit ? [hit.id] : fallback();
+  } catch {
+    return fallback();
+  }
+}
+
 // Creates the post as a DRAFT via the WP REST API. Requires:
 //   WORDPRESS_API_URL       e.g. https://freelanceatlas.com
 //   WORDPRESS_USERNAME      the WP user the application password belongs to
 //   WORDPRESS_APP_PASSWORD  the generated application password
+// Category is auto-resolved from the site's existing taxonomy (see resolveCategoryIds).
 // Optional:
-//   WORDPRESS_DEFAULT_CATEGORY_ID  numeric category id for new drafts
+//   WORDPRESS_DEFAULT_CATEGORY_ID  fallback category id when auto-resolution can't decide
+//   OPENROUTER_CATEGORY_MODEL      model for category selection (default google/gemini-2.5-flash)
 export async function createWordPressDraft(
   article: ArticleForWordPress,
   bodyHtml: string,
@@ -192,8 +278,10 @@ export async function createWordPressDraft(
     },
   };
 
-  const categoryId = process.env.WORDPRESS_DEFAULT_CATEGORY_ID;
-  if (categoryId) payload.categories = [Number(categoryId)];
+  // Auto-categorize into the site's existing taxonomy so posts never land in
+  // "Uncategorized". Best-effort: on any failure this returns a sensible fallback.
+  const categoryIds = await resolveCategoryIds(article, base);
+  if (categoryIds.length) payload.categories = categoryIds;
 
   // Attach the generated thumbnail as the post's featured image, if one exists.
   if (featuredMediaId) payload.featured_media = featuredMediaId;
